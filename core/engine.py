@@ -19,6 +19,7 @@ from knowledge.profiles import (
     DEFAULT_PRO_PROFILES,
     DEFAULT_CON_PROFILES,
 )
+from knowledge.generator import generate_profiles
 
 
 @dataclass
@@ -57,7 +58,12 @@ class DebateEngine:
     Supports knowledge graph profiles for richer, more grounded arguments.
     """
 
-    def __init__(self, topic: str):
+    def __init__(
+        self,
+        topic: str,
+        pro_profiles: list | None = None,
+        con_profiles: list | None = None,
+    ):
         self.topic = topic
         self.state = DebateState(topic=topic)
 
@@ -65,8 +71,16 @@ class DebateEngine:
         self.host = Host(topic)
         self.judge = Judge(topic)
 
-        # Choose profile mode: structured profiles for default topic, legacy for others
-        if topic == DEFAULT_TOPIC:
+        # Use provided profiles, or fall back to defaults / generation
+        if pro_profiles and con_profiles:
+            # Profiles provided externally (pre-generated or default)
+            self.pro_debaters = [
+                Debater(p, topic, "正方（支持）") for p in pro_profiles
+            ]
+            self.con_debaters = [
+                Debater(p, topic, "反方（反对）") for p in con_profiles
+            ]
+        elif topic == DEFAULT_TOPIC:
             self.pro_debaters = [
                 Debater(p, topic, "正方（支持）") for p in DEFAULT_PRO_PROFILES
             ]
@@ -74,12 +88,13 @@ class DebateEngine:
                 Debater(p, topic, "反方（反对）") for p in DEFAULT_CON_PROFILES
             ]
         else:
-            # Fallback to legacy dict profiles
+            # Generate profiles on the fly for custom topics
+            pro_gen, con_gen = generate_profiles(topic)
             self.pro_debaters = [
-                Debater(p, topic, "正方（支持）") for p in PRO_DEBATERS
+                Debater(p, topic, "正方（支持）") for p in pro_gen
             ]
             self.con_debaters = [
-                Debater(p, topic, "反方（反对）") for p in CON_DEBATERS
+                Debater(p, topic, "反方（反对）") for p in con_gen
             ]
 
         self.audience = [Audience(p, topic) for p in AUDIENCE_PROFILES]

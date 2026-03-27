@@ -26,6 +26,9 @@ class KnowledgeEntry:
     content: str
     domain: str  # e.g., "经济数据", "法律法规", "社会案例"
     keywords: list[str] = field(default_factory=list)
+    # Links knowledge to value dimensions (e.g., ["效率", "创新"])
+    # Used by retriever to prioritize knowledge based on agent's value weights
+    value_dimensions: list[str] = field(default_factory=list)
 
 
 @dataclass

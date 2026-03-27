@@ -13,6 +13,8 @@ from openai import OpenAI
 from core.engine import DebateEngine
 from core.config import PRO_DEBATERS, CON_DEBATERS, API_KEY, API_BASE_URL, MODEL_NAME
 from agents.audience import AUDIENCE_PROFILES
+from knowledge.profiles import DEFAULT_TOPIC
+from knowledge.generator import generate_profiles
 
 # --- Page config ---
 st.set_page_config(
@@ -543,7 +545,22 @@ if start_clicked and topic:
     st.session_state.debate_running = True
     st.session_state.debate_finished = False
 
-    engine = DebateEngine(topic)
+    # For custom topics: generate profiles first
+    pro_profiles = None
+    con_profiles = None
+    if topic != DEFAULT_TOPIC:
+        with st.spinner("🧠 正在为辩题生成角色画像和知识图谱..."):
+            try:
+                pro_profiles, con_profiles = generate_profiles(topic)
+                st.success(
+                    f"✅ 角色画像生成完成！"
+                    f"正方：{', '.join(p.identity.occupation for p in pro_profiles)} | "
+                    f"反方：{', '.join(p.identity.occupation for p in con_profiles)}"
+                )
+            except Exception as e:
+                st.warning(f"⚠️ 画像生成失败（{e}），将使用通用辩手配置")
+
+    engine = DebateEngine(topic, pro_profiles, con_profiles)
 
     progress_bar = st.progress(0, text="辩论准备中...")
     total_steps = (
