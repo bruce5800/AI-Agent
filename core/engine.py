@@ -6,7 +6,7 @@ from typing import Generator
 from agents.debater import Debater
 from agents.host import Host
 from agents.judge import Judge
-from agents.audience import Audience, AUDIENCE_PROFILES
+from agents.audience import Audience, AudienceVoteResult, DEFAULT_AUDIENCE_PROFILES, assign_audience_weights
 from core.config import (
     PRO_DEBATERS,
     CON_DEBATERS,
@@ -29,6 +29,7 @@ class DebateMessage:
     content: str
     phase: str
     side: str = ""  # "正方", "反方", "主持人", "评委", "观众"
+    vote_result: AudienceVoteResult | None = None  # structured vote data
 
 
 @dataclass
@@ -97,7 +98,27 @@ class DebateEngine:
                 Debater(p, topic, "反方（反对）") for p in con_gen
             ]
 
-        self.audience = [Audience(p, topic) for p in AUDIENCE_PROFILES]
+        # Extract value dimensions from debater profiles
+        self.value_dims = self._extract_value_dims()
+
+        # Create audience with value-weighted profiles
+        audience_profiles = assign_audience_weights(self.value_dims)
+        self.audience = [Audience(p, topic, self.value_dims) for p in audience_profiles]
+        self.vote_results: list[AudienceVoteResult] = []
+
+    def _extract_value_dims(self) -> list[str]:
+        """Extract value dimensions from debater profiles."""
+        dims: list[str] = []
+        all_debaters = self.pro_debaters + self.con_debaters
+        for d in all_debaters:
+            if d.has_knowledge and hasattr(d.agent_profile, 'get_value_dims'):
+                for dim in d.agent_profile.get_value_dims():
+                    if dim not in dims:
+                        dims.append(dim)
+        # Fallback: if no structured profiles, use common defaults
+        if not dims:
+            dims = ["效率", "公平", "安全"]
+        return dims[:3]  # Keep top 3
 
     def _add_message(self, speaker: str, content: str, phase: str, side: str = "") -> DebateMessage:
         msg = DebateMessage(speaker=speaker, content=content, phase=phase, side=side)
@@ -130,6 +151,23 @@ class DebateEngine:
         else:
             full_prompt = prompt
         return debater.speak(full_prompt)
+
+    def _format_vote_display(self, result: AudienceVoteResult) -> str:
+        """Format a structured vote result into readable text."""
+        lines = []
+        lines.append(f"**印象最深：** {result.comment}")
+        lines.append("")
+        lines.append("| 价值维度 | 我的权重 | 正方得分 | 反方得分 |")
+        lines.append("|:------:|:------:|:------:|:------:|")
+        for ds in result.dimension_scores:
+            w = result.weights.get(ds.dimension, 0)
+            lines.append(f"| {ds.dimension} | {w:.0%} | {ds.pro_score} | {ds.con_score} |")
+        lines.append("")
+        lines.append(f"**加权得分：** 正方 **{result.weighted_pro:.2f}** vs 反方 **{result.weighted_con:.2f}**")
+        lines.append("")
+        lines.append(f"**我的投票：{result.vote}**")
+        lines.append(f"**理由：** {result.reason}")
+        return "\n".join(lines)
 
     def run(self) -> Generator[DebateMessage, None, None]:
         """Run the full debate, yielding each message as it's generated."""
@@ -260,11 +298,19 @@ class DebateEngine:
         evaluation = self.judge.evaluate(transcript)
         yield self._add_message("评委", evaluation, "评委点评", "评委")
 
-        # === Phase 8: Audience voting ===
+        # === Phase 8: Audience voting (value-weighted) ===
         self.state.current_phase = "观众投票"
         for member in self.audience:
-            vote = member.vote(transcript)
-            yield self._add_message(member.name, vote, "观众投票", "观众")
+            raw_text, vote_result = member.vote(transcript)
+            if vote_result:
+                self.vote_results.append(vote_result)
+                # Build human-readable display text
+                display = self._format_vote_display(vote_result)
+            else:
+                display = raw_text  # Fallback: show raw LLM output
+            msg = self._add_message(member.name, display, "观众投票", "观众")
+            msg.vote_result = vote_result
+            yield msg
 
         self.state.current_phase = "辩论结束"
         self.state.is_finished = True

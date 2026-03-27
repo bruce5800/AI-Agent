@@ -12,7 +12,7 @@ import streamlit as st
 from openai import OpenAI
 from core.engine import DebateEngine
 from core.config import PRO_DEBATERS, CON_DEBATERS, API_KEY, API_BASE_URL, MODEL_NAME
-from agents.audience import AUDIENCE_PROFILES
+from agents.audience import DEFAULT_AUDIENCE_PROFILES, AudienceVoteResult
 from knowledge.profiles import DEFAULT_TOPIC
 from knowledge.generator import generate_profiles
 
@@ -305,76 +305,119 @@ def scroll_to_bottom():
     )
 
 
-def parse_votes(messages) -> tuple:
-    """Parse audience vote messages to extract vote counts."""
-    votes = {"正方": 0, "反方": 0}
-    voter_details = []
+def collect_vote_results(messages) -> list[AudienceVoteResult]:
+    """Collect structured vote results from audience messages."""
+    results = []
     for msg in messages:
-        if msg.phase == "观众投票":
-            content = msg.content
-            for line in content.split("\n"):
-                if "投票" in line and ("正方" in line or "反方" in line):
-                    if "正方" in line and "反方" not in line:
-                        votes["正方"] += 1
-                        voter_details.append((msg.speaker, "正方"))
-                        break
-                    elif "反方" in line and "正方" not in line:
-                        votes["反方"] += 1
-                        voter_details.append((msg.speaker, "反方"))
-                        break
-                    elif "正方" in line and "反方" in line:
-                        match = re.search(r"投票[：:]\s*(正方|反方)", line)
-                        if match:
-                            side = match.group(1)
-                            votes[side] += 1
-                            voter_details.append((msg.speaker, side))
-                            break
-    return votes, voter_details
+        if msg.phase == "观众投票" and msg.vote_result is not None:
+            results.append(msg.vote_result)
+    return results
 
 
 def render_vote_results(messages):
-    """Render vote statistics with a bar chart."""
-    votes, voter_details = parse_votes(messages)
-    total = votes["正方"] + votes["反方"]
-    if total == 0:
+    """Render value-weighted vote results with dimension breakdown."""
+    results = collect_vote_results(messages)
+
+    # Fallback: if no structured results, try simple text parsing
+    if not results:
+        votes = {"正方": 0, "反方": 0}
+        for msg in messages:
+            if msg.phase == "观众投票":
+                for line in msg.content.split("\n"):
+                    if "投票" in line:
+                        match = re.search(r"(正方|反方)", line)
+                        if match:
+                            votes[match.group(1)] += 1
+                            break
+        total = votes["正方"] + votes["反方"]
+        if total > 0:
+            st.markdown("---")
+            if votes["正方"] > votes["反方"]:
+                st.success(f"🏆 观众投票结果：**正方** 以 {votes['正方']}:{votes['反方']} 获胜！")
+            elif votes["反方"] > votes["正方"]:
+                st.error(f"🏆 观众投票结果：**反方** 以 {votes['反方']}:{votes['正方']} 获胜！")
+            else:
+                st.info(f"🤝 平局 {votes['正方']}:{votes['反方']}")
         return
 
+    # --- Structured vote visualization ---
     st.markdown("---")
     st.markdown(
-        '<div class="vote-summary"><div class="vote-title">🗳️ 观众投票统计</div></div>',
+        '<div class="vote-summary"><div class="vote-title">🗳️ 观众价值权重投票统计</div></div>',
         unsafe_allow_html=True,
     )
 
+    # Vote counts
+    pro_votes = sum(1 for r in results if r.vote == "正方")
+    con_votes = sum(1 for r in results if r.vote == "反方")
+    total = pro_votes + con_votes
+
     col1, col2, col3 = st.columns([1, 2, 1])
-
     with col1:
-        st.metric("🟢 正方", f"{votes['正方']} 票")
+        st.metric("🟢 正方", f"{pro_votes} 票")
     with col3:
-        st.metric("🔴 反方", f"{votes['反方']} 票")
-
+        st.metric("🔴 反方", f"{con_votes} 票")
     with col2:
-        pro_pct = votes["正方"] / total if total > 0 else 0
-        con_pct = votes["反方"] / total if total > 0 else 0
-
-        st.caption("正方得票率")
-        st.progress(pro_pct, text=f"{pro_pct:.0%}")
-        st.caption("反方得票率")
-        st.progress(con_pct, text=f"{con_pct:.0%}")
+        if total > 0:
+            pro_pct = pro_votes / total
+            con_pct = con_votes / total
+            st.caption("正方得票率")
+            st.progress(pro_pct, text=f"{pro_pct:.0%}")
+            st.caption("反方得票率")
+            st.progress(con_pct, text=f"{con_pct:.0%}")
 
     # Winner announcement
-    if votes["正方"] > votes["反方"]:
-        st.success(f"🏆 观众投票结果：**正方** 以 {votes['正方']}:{votes['反方']} 获胜！")
-    elif votes["反方"] > votes["正方"]:
-        st.error(f"🏆 观众投票结果：**反方** 以 {votes['反方']}:{votes['正方']} 获胜！")
+    if pro_votes > con_votes:
+        st.success(f"🏆 观众投票结果：**正方** 以 {pro_votes}:{con_votes} 获胜！")
+    elif con_votes > pro_votes:
+        st.error(f"🏆 观众投票结果：**反方** 以 {con_votes}:{pro_votes} 获胜！")
     else:
-        st.info(f"🤝 观众投票结果：**平局** {votes['正方']}:{votes['反方']}")
+        st.info(f"🤝 观众投票结果：**平局** {pro_votes}:{con_votes}")
 
-    # Voter breakdown
-    if voter_details:
-        with st.expander("查看每位观众的投票"):
-            for name, side in voter_details:
-                icon = "🟢" if side == "正方" else "🔴"
-                st.markdown(f"- {icon} **{name}** → {side}")
+    # --- Dimension aggregate analysis ---
+    # Collect all dimensions
+    all_dims = []
+    for r in results:
+        for ds in r.dimension_scores:
+            if ds.dimension not in all_dims:
+                all_dims.append(ds.dimension)
+
+    if all_dims:
+        st.markdown("#### 📊 各维度平均得分")
+        dim_cols = st.columns(len(all_dims))
+        for i, dim in enumerate(all_dims):
+            pro_scores = []
+            con_scores = []
+            for r in results:
+                for ds in r.dimension_scores:
+                    if ds.dimension == dim:
+                        pro_scores.append(ds.pro_score)
+                        con_scores.append(ds.con_score)
+            avg_pro = sum(pro_scores) / len(pro_scores) if pro_scores else 0
+            avg_con = sum(con_scores) / len(con_scores) if con_scores else 0
+            with dim_cols[i]:
+                st.markdown(f"**{dim}**")
+                st.markdown(f"🟢 {avg_pro:.1f}")
+                st.markdown(f"🔴 {avg_con:.1f}")
+
+    # --- Per-voter breakdown ---
+    with st.expander("🔍 查看每位观众的详细评分"):
+        for r in results:
+            icon = "🟢" if r.vote == "正方" else "🔴"
+            st.markdown(f"**{icon} {r.voter_name}** → {r.vote}（正方 {r.weighted_pro:.2f} vs 反方 {r.weighted_con:.2f}）")
+            st.caption(f"💬 {r.comment}")
+            st.caption(f"📝 {r.reason}")
+            # Mini dimension table
+            cols = st.columns(len(r.dimension_scores) + 1)
+            cols[0].markdown("维度")
+            for j, ds in enumerate(r.dimension_scores):
+                w = r.weights.get(ds.dimension, 0)
+                cols[j + 1].markdown(f"**{ds.dimension}** ({w:.0%})")
+            cols2 = st.columns(len(r.dimension_scores) + 1)
+            cols2[0].markdown("正/反")
+            for j, ds in enumerate(r.dimension_scores):
+                cols2[j + 1].markdown(f"🟢{ds.pro_score} / 🔴{ds.con_score}")
+            st.markdown("---")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -489,8 +532,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### 👥 观众席")
     audience_chips = "".join(
-        f"""<span class="audience-chip">{p["name"]}<span class="audience-tooltip">{p["background"]}</span></span>"""
-        for p in AUDIENCE_PROFILES
+        f"""<span class="audience-chip">{p.name}<span class="audience-tooltip">{p.background}</span></span>"""
+        for p in DEFAULT_AUDIENCE_PROFILES
     )
     st.markdown(f'<div class="audience-row">{audience_chips}</div>', unsafe_allow_html=True)
 

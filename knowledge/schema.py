@@ -1,6 +1,7 @@
 """Profile schema definitions for debaters and audience."""
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -56,6 +57,10 @@ class AgentProfile:
     def name(self) -> str:
         return self.identity.name
 
+    def get_value_dims(self) -> list[str]:
+        """Return the value dimensions used by this profile."""
+        return list(self.values.decision_weights.keys())
+
     def to_prompt_block(self) -> str:
         """Convert the profile into a structured prompt block."""
         lines = []
@@ -85,3 +90,19 @@ class AgentProfile:
             lines.append(f"- 口头禅/常用句式：{'、'.join(self.behavior.catchphrases)}")
 
         return "\n".join(lines)
+
+
+@dataclass
+class AudienceProfile:
+    """Profile for an audience member with value-weighted voting."""
+    name: str
+    background: str
+    # Value dimension weights — same dimensions as the debate's value_dims, sum ≈ 1.0
+    decision_weights: dict[str, float] = field(default_factory=dict)
+
+    def weights_description(self) -> str:
+        """Human-readable weight description for prompts."""
+        if not self.decision_weights:
+            return ""
+        parts = [f"{dim}({w:.0%})" for dim, w in self.decision_weights.items()]
+        return "、".join(parts)
