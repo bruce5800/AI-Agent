@@ -119,6 +119,12 @@ st.markdown("""
         font-size: 0.8em;
         color: #6a1b9a;
     }
+
+    /* ===== Fix container max-height (prevent content truncation) ===== */
+    [data-testid="stVerticalBlock"] > div {
+        max-height: none !important;
+        overflow: visible !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -163,10 +169,7 @@ def render_message(msg):
         if side_label
         else ""
     )
-    header_html = f"""<div class="msg-header">
-        <span class="msg-speaker">{cfg["icon"]} {msg.speaker}</span>
-        {tag_html}
-    </div>"""
+    header_html = f'<div class="msg-header"><span class="msg-speaker">{cfg["icon"]} {msg.speaker}</span> {tag_html}</div>'
 
     # Use st.container with border for the card
     with st.container(border=True):
