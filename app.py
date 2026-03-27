@@ -3,13 +3,15 @@
 import sys
 import os
 import re
+import json
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
+from openai import OpenAI
 from core.engine import DebateEngine
-from core.config import PRO_DEBATERS, CON_DEBATERS
+from core.config import PRO_DEBATERS, CON_DEBATERS, API_KEY, API_BASE_URL, MODEL_NAME
 from agents.audience import AUDIENCE_PROFILES
 
 # --- Page config ---
@@ -68,6 +70,20 @@ st.markdown("""
     .tag-host { background: #ffe0b2; color: #e65100; }
     .tag-judge { background: #bbdefb; color: #1565c0; }
     .tag-audience { background: #e1bee7; color: #7b1fa2; }
+
+    /* ===== Phase-based message background tints ===== */
+    .phase-bg-开篇立论 [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #fafff8;
+    }
+    .phase-bg-攻辩质询 [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #fffdf5;
+    }
+    .phase-bg-自由辩论 [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #fff8f5;
+    }
+    .phase-bg-总结陈词 [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #f5f8ff;
+    }
 
     /* ===== Vote result card ===== */
     .vote-summary {
@@ -194,33 +210,63 @@ st.markdown("""
         max-height: none !important;
         overflow: visible !important;
     }
+
+    /* ===== Mobile responsive ===== */
+    @media (max-width: 768px) {
+        .block-container { max-width: 100%; padding: 0.5rem 1rem; }
+        .team-row { flex-direction: column; }
+        .debater-card-tooltip {
+            left: 0 !important;
+            right: auto !important;
+            max-width: 180px;
+        }
+        .phase-divider { margin: 16px 0 8px 0; }
+        .audience-tooltip {
+            left: 0 !important;
+            transform: none !important;
+        }
+    }
+
+    /* ===== Topic suggestion chips ===== */
+    .topic-chip {
+        display: inline-block;
+        background: #e3f2fd;
+        border: 1px solid #90caf9;
+        border-radius: 16px;
+        padding: 4px 12px;
+        margin: 3px 2px;
+        font-size: 0.8em;
+        color: #1565c0;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .topic-chip:hover {
+        background: #bbdefb;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
 # --- Helper functions ---
 SIDE_CONFIG = {
-    "正方": {"icon": "🟢", "tag_class": "tag-pro", "border_color": "#4caf50", "bg_color": "#f1f8e9"},
-    "反方": {"icon": "🔴", "tag_class": "tag-con", "border_color": "#e53935", "bg_color": "#fce4ec"},
-    "主持人": {"icon": "🎙️", "tag_class": "tag-host", "border_color": "#ff9800", "bg_color": "#fff8e1"},
-    "评委": {"icon": "⚖️", "tag_class": "tag-judge", "border_color": "#1976d2", "bg_color": "#e3f2fd"},
-    "观众": {"icon": "👥", "tag_class": "tag-audience", "border_color": "#9c27b0", "bg_color": "#f3e5f5"},
+    "正方": {"icon": "🟢", "tag_class": "tag-pro"},
+    "反方": {"icon": "🔴", "tag_class": "tag-con"},
+    "主持人": {"icon": "🎙️", "tag_class": "tag-host"},
+    "评委": {"icon": "⚖️", "tag_class": "tag-judge"},
+    "观众": {"icon": "👥", "tag_class": "tag-audience"},
+}
+
+PHASE_ICONS = {
+    "开场": "📢", "开篇立论": "📜", "攻辩质询": "⚔️",
+    "自由辩论": "🔥", "总结陈词": "📝", "结束": "🏁",
+    "评委点评": "⚖️", "观众投票": "🗳️",
 }
 
 
 def render_phase_divider(phase: str):
     """Render a centered phase divider."""
-    phase_icons = {
-        "开场": "📢",
-        "开篇立论": "📜",
-        "攻辩质询": "⚔️",
-        "自由辩论": "🔥",
-        "总结陈词": "📝",
-        "结束": "🏁",
-        "评委点评": "⚖️",
-        "观众投票": "🗳️",
-    }
-    icon = phase_icons.get(phase, "▪️")
+    icon = PHASE_ICONS.get(phase, "▪️")
     st.markdown(
         f'<div class="phase-divider"><span class="phase-divider-text">{icon} {phase}</span></div>',
         unsafe_allow_html=True,
@@ -246,18 +292,24 @@ def render_message(msg):
         st.markdown(msg.content)
 
 
-def parse_votes(messages) -> dict:
+def scroll_to_bottom():
+    """Inject JS to scroll the main area to the bottom."""
+    st.markdown(
+        """<script>
+        const main = window.parent.document.querySelector('section.main');
+        if (main) main.scrollTop = main.scrollHeight;
+        </script>""",
+        unsafe_allow_html=True,
+    )
+
+
+def parse_votes(messages) -> tuple:
     """Parse audience vote messages to extract vote counts."""
     votes = {"正方": 0, "反方": 0}
     voter_details = []
     for msg in messages:
         if msg.phase == "观众投票":
             content = msg.content
-            # Try to match vote pattern
-            if "正方" in content and ("我的投票" in content or "投票" in content):
-                if "反方" not in content.split("我的投票")[-1] if "我的投票" in content else True:
-                    pass  # need more careful parsing
-            # Simple heuristic: find the line with "我的投票"
             for line in content.split("\n"):
                 if "投票" in line and ("正方" in line or "反方" in line):
                     if "正方" in line and "反方" not in line:
@@ -269,7 +321,6 @@ def parse_votes(messages) -> dict:
                         voter_details.append((msg.speaker, "反方"))
                         break
                     elif "正方" in line and "反方" in line:
-                        # Both mentioned — check which comes after "投票："
                         match = re.search(r"投票[：:]\s*(正方|反方)", line)
                         if match:
                             side = match.group(1)
@@ -300,7 +351,6 @@ def render_vote_results(messages):
         st.metric("🔴 反方", f"{votes['反方']} 票")
 
     with col2:
-        # Horizontal bar using st.progress
         pro_pct = votes["正方"] / total if total > 0 else 0
         con_pct = votes["反方"] / total if total > 0 else 0
 
@@ -325,6 +375,36 @@ def render_vote_results(messages):
                 st.markdown(f"- {icon} **{name}** → {side}")
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def suggest_topics(user_hint: str) -> list[str]:
+    """Call LLM to suggest debate topics based on user's hint."""
+    client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+    prompt = f"""用户想要一个辩论赛的辩题，ta给出的关键词或方向是："{user_hint}"
+
+请推荐5个适合辩论的辩题。要求：
+1. 辩题必须是一个可以有正反两方立场的陈述句
+2. 辩题要有争议性，双方都有合理的论据
+3. 直接输出JSON数组，不要其他内容
+
+输出格式：["辩题1", "辩题2", "辩题3", "辩题4", "辩题5"]"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,
+            max_tokens=300,
+        )
+        text = response.choices[0].message.content.strip()
+        # Extract JSON array from response
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    except Exception:
+        pass
+    return []
+
+
 # --- Sidebar ---
 with st.sidebar:
     st.markdown("## 🎙️ Multi-Agent Debate")
@@ -342,10 +422,46 @@ with st.sidebar:
     ]
 
     topic_choice = st.selectbox("选择辩题", default_topics, label_visibility="collapsed")
+
     if topic_choice == "自定义辩题...":
-        topic = st.text_input("输入辩题", placeholder="例如：科技进步是否会消灭人类的就业机会")
+        # Custom topic with AI suggestion
+        col_input, col_btn = st.columns([3, 1])
+        with col_input:
+            custom_hint = st.text_input(
+                "输入关键词或辩题",
+                placeholder="例如：教育、科技、环保...",
+                label_visibility="collapsed",
+            )
+        with col_btn:
+            suggest_clicked = st.button("推荐", use_container_width=True)
+
+        # Show suggestions
+        if suggest_clicked and custom_hint:
+            with st.spinner("AI 正在推荐辩题..."):
+                suggestions = suggest_topics(custom_hint)
+            if suggestions:
+                st.session_state.topic_suggestions = suggestions
+
+        if "topic_suggestions" in st.session_state and st.session_state.topic_suggestions:
+            st.caption("💡 点击选择推荐辩题：")
+            for i, s in enumerate(st.session_state.topic_suggestions):
+                if st.button(s, key=f"suggest_{i}", use_container_width=True):
+                    st.session_state.selected_topic = s
+                    st.rerun()
+
+        # Determine final topic
+        if "selected_topic" in st.session_state and st.session_state.selected_topic:
+            topic = st.session_state.selected_topic
+            st.success(f"已选择：{topic}")
+        else:
+            topic = custom_hint
     else:
         topic = topic_choice
+        # Clear suggestion state when switching back to presets
+        if "selected_topic" in st.session_state:
+            st.session_state.selected_topic = ""
+        if "topic_suggestions" in st.session_state:
+            st.session_state.topic_suggestions = []
 
     st.markdown("---")
     st.markdown("#### 🟢 正方辩手")
@@ -378,7 +494,7 @@ with st.sidebar:
 
 
 # --- Main area ---
-st.markdown(f"## 辩论赛场")
+st.markdown("## 辩论赛场")
 if topic:
     st.markdown(f"> **辩题：{topic}**")
 
@@ -454,6 +570,8 @@ if start_clicked and topic:
             min(step / total_steps, 1.0),
             text=f"辩论进行中... {msg.phase}",
         )
+        # Auto-scroll to latest message
+        scroll_to_bottom()
 
     progress_bar.progress(1.0, text="✅ 辩论已结束！")
     st.session_state.debate_running = False
