@@ -84,13 +84,21 @@ st.markdown("""
         color: #37474f;
     }
 
-    /* ===== Sidebar debater cards ===== */
+    /* ===== Sidebar debater cards (compact + tooltip) ===== */
+    .team-row {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 8px;
+    }
     .debater-card {
-        padding: 8px 10px;
+        flex: 1;
+        padding: 6px 10px;
         border-radius: 8px;
-        margin-bottom: 6px;
         font-size: 0.82em;
         line-height: 1.4;
+        cursor: default;
+        position: relative;
+        transition: box-shadow 0.2s ease;
     }
     .debater-card-pro {
         background: #e8f5e9;
@@ -104,20 +112,81 @@ st.markdown("""
         font-weight: 700;
         font-size: 0.9em;
     }
-    .debater-card-detail {
-        color: #616161;
-        margin-top: 2px;
+    .debater-card:hover {
+        box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    }
+    .debater-card-tooltip {
+        visibility: hidden;
+        opacity: 0;
+        position: absolute;
+        bottom: 100%;
+        left: 0;
+        background: #37474f;
+        color: white;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 0.88em;
+        line-height: 1.5;
+        width: max-content;
+        max-width: 200px;
+        white-space: normal;
+        transition: opacity 0.2s ease;
+        pointer-events: none;
+        margin-bottom: 6px;
+        z-index: 100;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    /* Right-side cards: tooltip aligns to right edge */
+    .debater-card:last-child .debater-card-tooltip {
+        left: auto;
+        right: 0;
+    }
+    .debater-card:hover .debater-card-tooltip {
+        visibility: visible;
+        opacity: 1;
     }
 
-    /* ===== Audience card ===== */
-    .audience-card {
-        display: inline-block;
+    /* ===== Audience chips (compact) ===== */
+    .audience-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+    .audience-chip {
         background: #f3e5f5;
-        border-radius: 16px;
-        padding: 3px 12px;
-        margin: 2px 4px;
-        font-size: 0.8em;
+        border-radius: 14px;
+        padding: 2px 10px;
+        font-size: 0.78em;
         color: #6a1b9a;
+        cursor: default;
+        position: relative;
+        transition: all 0.2s ease;
+    }
+    .audience-chip:hover {
+        background: #e1bee7;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    }
+    .audience-tooltip {
+        visibility: hidden;
+        opacity: 0;
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #37474f;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 0.85em;
+        white-space: nowrap;
+        transition: opacity 0.2s ease;
+        pointer-events: none;
+        margin-bottom: 4px;
+        z-index: 100;
+    }
+    .audience-chip:hover .audience-tooltip {
+        visibility: visible;
+        opacity: 1;
     }
 
     /* ===== Fix container max-height (prevent content truncation) ===== */
@@ -279,35 +348,33 @@ with st.sidebar:
         topic = topic_choice
 
     st.markdown("---")
-    st.markdown("### 🟢 正方辩手")
-    for d in PRO_DEBATERS:
-        st.markdown(
-            f"""<div class="debater-card debater-card-pro">
-                <div class="debater-card-name">{d['name']}</div>
-                <div class="debater-card-detail">💡 {d['personality']}</div>
-                <div class="debater-card-detail">🎤 {d['style']}</div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
+    st.markdown("#### 🟢 正方辩手")
+    pro_cards = "".join(
+        f"""<div class="debater-card debater-card-pro">
+            <div class="debater-card-name">{d['name']}</div>
+            <div class="debater-card-tooltip">💡 {d['personality']}<br>🎤 {d['style']}</div>
+        </div>"""
+        for d in PRO_DEBATERS
+    )
+    st.markdown(f'<div class="team-row">{pro_cards}</div>', unsafe_allow_html=True)
 
-    st.markdown("### 🔴 反方辩手")
-    for d in CON_DEBATERS:
-        st.markdown(
-            f"""<div class="debater-card debater-card-con">
-                <div class="debater-card-name">{d['name']}</div>
-                <div class="debater-card-detail">💡 {d['personality']}</div>
-                <div class="debater-card-detail">🎤 {d['style']}</div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
+    st.markdown("#### 🔴 反方辩手")
+    con_cards = "".join(
+        f"""<div class="debater-card debater-card-con">
+            <div class="debater-card-name">{d['name']}</div>
+            <div class="debater-card-tooltip">💡 {d['personality']}<br>🎤 {d['style']}</div>
+        </div>"""
+        for d in CON_DEBATERS
+    )
+    st.markdown(f'<div class="team-row">{con_cards}</div>', unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("### 👥 观众席")
-    audience_html = "".join(
-        f'<span class="audience-card">{p["name"]} · {p["background"]}</span>'
+    st.markdown("#### 👥 观众席")
+    audience_chips = "".join(
+        f"""<span class="audience-chip">{p["name"]}<span class="audience-tooltip">{p["background"]}</span></span>"""
         for p in AUDIENCE_PROFILES
     )
-    st.markdown(audience_html, unsafe_allow_html=True)
+    st.markdown(f'<div class="audience-row">{audience_chips}</div>', unsafe_allow_html=True)
 
 
 # --- Main area ---
