@@ -15,6 +15,7 @@ from core.config import PRO_DEBATERS, CON_DEBATERS, API_KEY, API_BASE_URL, MODEL
 from agents.audience import DEFAULT_AUDIENCE_PROFILES, AudienceVoteResult
 from knowledge.profiles import DEFAULT_TOPIC
 from knowledge.generator import generate_profiles
+from core.tts import generate_speech
 
 # --- Page config ---
 st.set_page_config(
@@ -537,6 +538,10 @@ with st.sidebar:
     )
     st.markdown(f'<div class="audience-row">{audience_chips}</div>', unsafe_allow_html=True)
 
+    st.markdown("---")
+    st.markdown("#### 🔊 语音设置")
+    tts_enabled = st.toggle("开启辩手语音播报", value=False, help="辩手发言结束后自动朗读")
+
 
 # --- Main area ---
 st.markdown("## 辩论赛场")
@@ -681,6 +686,17 @@ if start_clicked and topic:
                 min(step / total_steps, 1.0),
                 text=f"辩论进行中... {msg.phase}",
             )
+
+            # TTS playback for debater messages
+            if tts_enabled and msg.side in ("正方", "反方"):
+                audio_data = generate_speech(msg.content, msg.side)
+                if audio_data:
+                    import base64
+                    b64 = base64.b64encode(audio_data).decode()
+                    st.markdown(
+                        f'<audio autoplay controls src="data:audio/mpeg;base64,{b64}"></audio>',
+                        unsafe_allow_html=True,
+                    )
 
             # Reset streaming state for next speaker
             current_placeholder = None
