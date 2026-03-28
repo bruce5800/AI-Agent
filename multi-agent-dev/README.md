@@ -8,29 +8,29 @@
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  Streamlit UI (app.py)                │
-│  需求输入 / 流式渲染 / 审批按钮 / 文件树 / 进度条     │
+│                  Streamlit UI (app.py)              │
+│  需求输入 / 流式渲染 / 审批按钮 / 文件树 / 进度条         │
 └────────────────────────┬────────────────────────────┘
                          │ yields DevMessage (Generator)
 ┌────────────────────────▼────────────────────────────┐
-│               DevEngine (core/engine.py)             │
-│  7 阶段状态机 / Agent 间上下文传递 / 审批门 / 修复循环 │
+│               DevEngine (core/engine.py)            │
+│  7 阶段状态机 / Agent 间上下文传递 / 审批门 / 修复循环    │
 └────────────────────────┬────────────────────────────┘
                          │ agent.run_with_tools()
 ┌────────────────────────▼────────────────────────────┐
-│                Agent Layer (agents/)                  │
-│  BaseAgent → ToolAgent (Agentic tool-calling loop)   │
-│  PM  │  Architect  │  Programmer  │  Reviewer        │
+│                Agent Layer (agents/)                │
+│  BaseAgent → ToolAgent (Agentic tool-calling loop)  │
+│  PM  │  Architect  │  Programmer  │  Reviewer       │
 └────────────────────────┬────────────────────────────┘
                          │ execute_tool()
-┌────────────────────────▼────────────────────────────┐
+┌────────────────────────▼──────────────────────────────┐
 │             MCP Server Layer (mcp_servers/)           │
 │  filesystem_server  │  terminal_server  │  git_server │
-└────────────────────────┬────────────────────────────┘
+└────────────────────────┬──────────────────────────────┘
                          │ OS operations (sandboxed)
 ┌────────────────────────▼────────────────────────────┐
-│              workspace/<project_name>/                │
-│  requirements.md / design.md / src/ / tests/         │
+│              workspace/<project_name>/              │
+│  requirements.md / design.md / src/ / tests/        │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -197,6 +197,21 @@ ToolAgent.run_with_tools()  →  DevEngine.run()  →  Streamlit UI
 - **命令黑名单**: 拦截 `rm -rf /`、`sudo`、`shutdown` 等危险命令
 - **执行超时**: shell 命令默认 30 秒超时
 - **workspace 隔离**: 每个项目在独立目录中运行
+
+## Roadmap
+
+- [ ] **Phase 1: FastAPI 后端** — 把 DevEngine 包装成 RESTful API，SSE 流式推送替代 Streamlit 轮询
+  - [ ] FastAPI 路由：`/api/dev/start`（SSE 流式开发）、`/api/dev/approve`（审批）、`/api/workspace/*`（文件浏览/下载）
+  - [ ] 将 Generator `yield DevMessage` 转为 SSE `event-stream` 推送
+  - [ ] 审批门改为异步等待（前端 POST 审批结果，后端 resume Generator）
+  - [ ] `core/` 和 `agents/` 零改动，仅替换 UI 层
+
+- [ ] **Phase 2: PostgreSQL 数据库** — 用户系统 + 项目持久化 + 消息历史
+  - [ ] 数据模型：User / Project / Message 三表设计
+  - [ ] SQLAlchemy 2.0 ORM + Alembic 迁移管理
+  - [ ] JWT 用户认证（注册/登录）
+  - [ ] 项目 CRUD + 开发消息持久化（含工具调用记录 JSON 字段）
+  - [ ] 历史项目回看：按时间线回放完整开发过程
 
 ## License
 
