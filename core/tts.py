@@ -75,3 +75,11 @@ def generate_speech(text: str, side: str = "") -> bytes | None:
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+def estimate_duration(audio_bytes: bytes) -> float:
+    """Estimate audio duration in seconds from MP3 bytes.
+
+    edge-tts outputs 48kbps mono audio consistently.
+    """
+    return len(audio_bytes) / 6000  # 48kbps = 6000 bytes/sec

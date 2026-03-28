@@ -15,7 +15,7 @@ from core.config import PRO_DEBATERS, CON_DEBATERS, API_KEY, API_BASE_URL, MODEL
 from agents.audience import DEFAULT_AUDIENCE_PROFILES, AudienceVoteResult
 from knowledge.profiles import DEFAULT_TOPIC
 from knowledge.generator import generate_profiles
-from core.tts import generate_speech
+from core.tts import generate_speech, estimate_duration
 
 # --- Page config ---
 st.set_page_config(
@@ -692,11 +692,14 @@ if start_clicked and topic:
                 audio_data = generate_speech(msg.content, msg.side)
                 if audio_data:
                     import base64
+                    import time
                     b64 = base64.b64encode(audio_data).decode()
                     st.markdown(
                         f'<audio autoplay controls src="data:audio/mpeg;base64,{b64}"></audio>',
                         unsafe_allow_html=True,
                     )
+                    # Wait for audio to finish before next speaker
+                    time.sleep(estimate_duration(audio_data))
 
             # Reset streaming state for next speaker
             current_placeholder = None
