@@ -80,20 +80,35 @@ score = 关键词匹配 + 价值对齐(权重×4.0) + 身份相关性 + 内容�
 2. 按个人权重加权计算总分：`weighted_score = Σ(维度得分 × 权重)`
 3. 总分高者获得该观众的一票
 
+### 流式输出 + 语音播报
+
+- **逐字流式渲染** — 辩手、主持人、评委的发言逐 token 实时显示，模拟现场辩论节奏
+- **TTS 语音播报**（可选）— 侧边栏开启后，辩手发言结束自动朗读，播完再轮到下一位
+  - 基于 Edge TTS（免费，无需额外 API Key）
+  - 正反方使用不同语音，区分阵营
+
+| 角色 | 语音 | 特点 |
+|:---:|------|------|
+| 正方 | YunxiNeural | 男声，清晰 |
+| 反方 | YunyangNeural | 男声，沉稳 |
+| 主持人 | XiaoxiaoNeural | 女声，专业 |
+| 评委 | XiaoyiNeural | 女声，温和 |
+
 ## 项目结构
 
 ```
 multi-agent-debate/
 ├── app.py                          # Streamlit 主界面
 ├── agents/
-│   ├── base.py                     # BaseAgent 基类
+│   ├── base.py                     # BaseAgent 基类（支持流式输出）
 │   ├── debater.py                  # 辩手 Agent（支持简单/结构化画像）
 │   ├── host.py                     # 主持人 Agent（含 LLM 调度）
 │   ├── judge.py                    # 评委 Agent（四维度评分）
 │   └── audience.py                 # 观众 Agent（价值权重投票）
 ├── core/
 │   ├── config.py                   # API 和辩论参数配置
-│   └── engine.py                   # 辩论引擎（生成器模式）
+│   ├── engine.py                   # 辩论引擎（生成器模式 + 流式输出）
+│   └── tts.py                      # Edge TTS 语音合成（角色差异化语音）
 ├── knowledge/
 │   ├── schema.py                   # 数据模型（AgentProfile, AudienceProfile 等）
 │   ├── profiles.py                 # 默认辩题的预设画像
@@ -129,8 +144,9 @@ streamlit run app.py
 
 浏览器打开后：
 1. 左侧边栏选择预设辩题或输入自定义辩题
-2. 点击 "开始辩论"
-3. 实时观看辩论过程，最终查看评委评分和观众投票结果
+2. （可选）开启 "辩手语音播报" 开关
+3. 点击 "开始辩论"
+4. 实时观看辩论过程，最终查看评委评分和观众投票结果
 
 ## 配置说明
 
@@ -145,5 +161,6 @@ streamlit run app.py
 ## 技术栈
 
 - **LLM**: DeepSeek Chat (OpenAI 兼容接口)
+- **TTS**: Edge TTS (微软免费语音合成)
 - **前端**: Streamlit
 - **语言**: Python 3.10+
