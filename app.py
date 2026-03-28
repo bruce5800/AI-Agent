@@ -618,20 +618,77 @@ if start_clicked and topic:
     step = 0
     last_phase = None
 
-    for msg in engine.run():
-        st.session_state.messages.append(msg)
-        # Phase divider
-        if msg.phase != last_phase:
-            render_phase_divider(msg.phase)
-            last_phase = msg.phase
-        render_message(msg)
-        step += 1
-        progress_bar.progress(
-            min(step / total_steps, 1.0),
-            text=f"辩论进行中... {msg.phase}",
-        )
-        # Auto-scroll to latest message
-        scroll_to_bottom()
+    # Streaming state
+    current_placeholder = None
+    current_container = None
+    current_accumulated = ""
+    current_speaker = None
+    current_header_html = ""
+
+    for msg in engine.run_stream():
+        if msg.is_chunk:
+            # --- Streaming delta token ---
+            # New speaker? Create a new container + placeholder
+            if msg.speaker != current_speaker or current_placeholder is None:
+                # Phase divider if needed
+                if msg.phase != last_phase:
+                    render_phase_divider(msg.phase)
+                    last_phase = msg.phase
+
+                # Build header HTML for this speaker
+                cfg = SIDE_CONFIG.get(msg.side, SIDE_CONFIG["主持人"])
+                side_label = msg.side if msg.side in ("正方", "反方") else ""
+                tag_html = (
+                    f'<span class="msg-side-tag {cfg["tag_class"]}">{side_label}</span>'
+                    if side_label else ""
+                )
+                current_header_html = (
+                    f'<div class="msg-header">'
+                    f'<span class="msg-speaker">{cfg["icon"]} {msg.speaker}</span> {tag_html}'
+                    f'</div>'
+                )
+
+                current_container = st.container(border=True)
+                current_placeholder = current_container.empty()
+                current_accumulated = ""
+                current_speaker = msg.speaker
+
+            # Accumulate and re-render
+            current_accumulated += msg.content
+            current_placeholder.markdown(
+                current_header_html + "\n\n" + current_accumulated,
+                unsafe_allow_html=True,
+            )
+        else:
+            # --- Complete message ---
+            if msg.speaker == current_speaker and current_placeholder is not None:
+                # Final render for streamed message — replace placeholder with final content
+                current_placeholder.markdown(
+                    current_header_html + "\n\n" + msg.content,
+                    unsafe_allow_html=True,
+                )
+            else:
+                # Non-streamed message (e.g., audience voting)
+                if msg.phase != last_phase:
+                    render_phase_divider(msg.phase)
+                    last_phase = msg.phase
+                render_message(msg)
+
+            # Save to session and update progress
+            st.session_state.messages.append(msg)
+            step += 1
+            progress_bar.progress(
+                min(step / total_steps, 1.0),
+                text=f"辩论进行中... {msg.phase}",
+            )
+
+            # Reset streaming state for next speaker
+            current_placeholder = None
+            current_container = None
+            current_accumulated = ""
+            current_speaker = None
+
+            scroll_to_bottom()
 
     progress_bar.progress(1.0, text="✅ 辩论已结束！")
     st.session_state.debate_running = False

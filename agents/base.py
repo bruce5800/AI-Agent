@@ -1,5 +1,7 @@
 """Base agent class for all debate participants."""
 
+from typing import Generator
+
 from openai import OpenAI
 from core.config import API_KEY, API_BASE_URL, MODEL_NAME
 
@@ -13,11 +15,16 @@ class BaseAgent:
         self.client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
         self.history: list[dict] = []
 
-    def speak(self, user_message: str) -> str:
-        """Generate a response given the current context."""
+    def _build_messages(self, user_message: str) -> list[dict]:
+        """Build the message list for an API call."""
         messages = [{"role": "system", "content": self.system_prompt}]
         messages.extend(self.history)
         messages.append({"role": "user", "content": user_message})
+        return messages
+
+    def speak(self, user_message: str) -> str:
+        """Generate a response given the current context."""
+        messages = self._build_messages(user_message)
 
         response = self.client.chat.completions.create(
             model=MODEL_NAME,
@@ -33,6 +40,38 @@ class BaseAgent:
         self.history.append({"role": "assistant", "content": reply})
 
         return reply
+
+    def speak_stream(self, user_message: str) -> Generator[str, None, str]:
+        """Generate a streaming response, yielding each token chunk.
+
+        Yields:
+            str: each token chunk as it arrives
+
+        Returns:
+            str: the full accumulated reply (accessible via generator.value after StopIteration)
+        """
+        messages = self._build_messages(user_message)
+
+        stream = self.client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            temperature=0.8,
+            max_tokens=500,
+            stream=True,
+        )
+
+        full_reply = ""
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                full_reply += delta
+                yield delta
+
+        # Save to history for context continuity
+        self.history.append({"role": "user", "content": user_message})
+        self.history.append({"role": "assistant", "content": full_reply})
+
+        return full_reply
 
     def reset(self):
         """Clear conversation history."""

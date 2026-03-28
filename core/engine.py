@@ -30,6 +30,7 @@ class DebateMessage:
     phase: str
     side: str = ""  # "正方", "反方", "主持人", "评委", "观众"
     vote_result: AudienceVoteResult | None = None  # structured vote data
+    is_chunk: bool = False  # True = streaming delta token, False = complete message
 
 
 @dataclass
@@ -151,6 +152,13 @@ class DebateEngine:
         else:
             full_prompt = prompt
         return debater.speak(full_prompt)
+
+    def _build_debater_prompt(self, debater: Debater, prompt: str, context: str) -> str:
+        """Build the full prompt for a debater (with knowledge injection)."""
+        knowledge_block = self._inject_knowledge(debater, context)
+        if knowledge_block:
+            return f"{prompt}\n\n{knowledge_block}"
+        return prompt
 
     def _format_vote_display(self, result: AudienceVoteResult) -> str:
         """Format a structured vote result into readable text."""
@@ -308,6 +316,203 @@ class DebateEngine:
                 display = self._format_vote_display(vote_result)
             else:
                 display = raw_text  # Fallback: show raw LLM output
+            msg = self._add_message(member.name, display, "观众投票", "观众")
+            msg.vote_result = vote_result
+            yield msg
+
+        self.state.current_phase = "辩论结束"
+        self.state.is_finished = True
+
+    # ------------------------------------------------------------------
+    # Streaming version — yields chunk messages for token-by-token render
+    # ------------------------------------------------------------------
+
+    def _stream_agent(
+        self, agent, prompt: str, speaker: str, phase: str, side: str,
+    ) -> Generator[DebateMessage, None, None]:
+        """Stream an agent's response token by token, then yield the final message."""
+        full_text = ""
+        for delta in agent.speak_stream(prompt):
+            full_text += delta
+            yield DebateMessage(
+                speaker=speaker, content=delta, phase=phase, side=side, is_chunk=True,
+            )
+        # Yield final complete message and add to state
+        msg = self._add_message(speaker, full_text, phase, side)
+        yield msg
+
+    def _stream_debater(
+        self, debater: Debater, prompt: str, context: str, phase: str, side: str,
+    ) -> Generator[DebateMessage, None, None]:
+        """Stream a debater's response with knowledge injection."""
+        full_prompt = self._build_debater_prompt(debater, prompt, context)
+        yield from self._stream_agent(debater, full_prompt, debater.name, phase, side)
+
+    def run_stream(self) -> Generator[DebateMessage, None, None]:
+        """Run the full debate with token-level streaming.
+
+        Yields DebateMessage with is_chunk=True for streaming deltas,
+        and is_chunk=False for complete messages (used for state tracking).
+        """
+
+        # === Phase 1: Opening ===
+        self.state.current_phase = "开场"
+        yield from self._stream_agent(
+            self.host,
+            "请做开场白：宣布辩题，简要介绍双方辩手，说明辩论规则和流程。控制在150字以内。",
+            "主持人", "开场", "主持人",
+        )
+
+        # === Phase 2: Opening statements ===
+        self.state.current_phase = "开篇立论"
+        yield from self._stream_agent(
+            self.host, "请做过渡引导，当前进入环节：开篇立论——请正方一辩先行立论。控制在50字以内。",
+            "主持人", "开篇立论", "主持人",
+        )
+
+        base_prompt = f"请进行开篇立论，阐述正方的核心观点和论证框架。辩题：{self.topic}"
+        yield from self._stream_debater(
+            self.pro_debaters[0], base_prompt, self.topic, "开篇立论", "正方",
+        )
+
+        yield from self._stream_agent(
+            self.host, "请做过渡引导，当前进入环节：请反方一辩进行立论。控制在50字以内。",
+            "主持人", "开篇立论", "主持人",
+        )
+
+        context = self._build_context()
+        base_prompt = f"对方已经完成立论。以下是目前的辩论内容：\n\n{context}\n\n请进行反方的开篇立论，回应对方观点并阐述你方立场。"
+        yield from self._stream_debater(
+            self.con_debaters[0], base_prompt, context, "开篇立论", "反方",
+        )
+
+        # === Phase 3: Rebuttal rounds ===
+        self.state.current_phase = "攻辩质询"
+        yield from self._stream_agent(
+            self.host, "请做过渡引导，当前进入环节：攻辩质询环节——由双方二辩进行交锋。控制在50字以内。",
+            "主持人", "攻辩质询", "主持人",
+        )
+
+        for round_num in range(DEBATE_ROUNDS):
+            context = self._build_context()
+            base_prompt = f"当前是第{round_num + 1}轮攻辩。以下是目前的辩论内容：\n\n{context}\n\n请针对对方论点进行质询和反驳。"
+            yield from self._stream_debater(
+                self.pro_debaters[1], base_prompt, context, "攻辩质询", "正方",
+            )
+
+            context = self._build_context()
+            base_prompt = f"当前是第{round_num + 1}轮攻辩。以下是目前的辩论内容：\n\n{context}\n\n请回应对方的质询并进行反击。"
+            yield from self._stream_debater(
+                self.con_debaters[1], base_prompt, context, "攻辩质询", "反方",
+            )
+
+        # === Phase 4: Free debate ===
+        self.state.current_phase = "自由辩论"
+        yield from self._stream_agent(
+            self.host, "请做过渡引导，当前进入环节：自由辩论环节——双方可自由发言交锋。控制在50字以内。",
+            "主持人", "自由辩论", "主持人",
+        )
+
+        all_debaters = self.pro_debaters + self.con_debaters
+        debater_map = {d.name: d for d in all_debaters}
+        debater_names = [d.name for d in all_debaters]
+        speak_counts = {d.name: 0 for d in all_debaters}
+        last_speaker = None
+
+        for i in range(FREE_DEBATE_EXCHANGES):
+            context = self._build_context()
+
+            # Host dispatch (not streamed — internal JSON)
+            dispatch = self.host.dispatch(debater_names, speak_counts, context)
+            selected_name = dispatch["selected"]
+
+            if selected_name not in debater_map:
+                selected_name = min(speak_counts, key=speak_counts.get)
+            if selected_name == last_speaker and len(debater_names) > 1:
+                candidates = [n for n in debater_names if n != last_speaker]
+                selected_name = min(candidates, key=lambda n: speak_counts[n])
+
+            dispatch_reason = dispatch.get("reason", "")
+            debater = debater_map[selected_name]
+            side = "正方" if debater in self.pro_debaters else "反方"
+            base_prompt = (
+                f"自由辩论环节。你主动站起来发言。\n"
+                f"调度提示（观众不可见）：{dispatch_reason}\n\n"
+                f"以下是最近的辩论内容：\n\n{context}\n\n"
+                f"请回应对方或补充己方论点。简洁有力，控制在100字以内。"
+            )
+            yield from self._stream_debater(debater, base_prompt, context, "自由辩论", side)
+
+            speak_counts[selected_name] += 1
+            last_speaker = selected_name
+
+        # === Phase 5: Closing statements ===
+        self.state.current_phase = "总结陈词"
+        yield from self._stream_agent(
+            self.host, "请做过渡引导，当前进入环节：总结陈词——请反方三辩先行总结。控制在50字以内。",
+            "主持人", "总结陈词", "主持人",
+        )
+
+        context = self._build_context()
+        base_prompt = f"辩论即将结束。以下是辩论的主要内容：\n\n{context}\n\n请进行反方的总结陈词，概括己方论点，回应对方关键质疑，做出有力收束。"
+        yield from self._stream_debater(
+            self.con_debaters[2], base_prompt, context, "总结陈词", "反方",
+        )
+
+        yield from self._stream_agent(
+            self.host, "请做过渡引导，当前进入环节：请正方三辩进行总结陈词。控制在50字以内。",
+            "主持人", "总结陈词", "主持人",
+        )
+
+        context = self._build_context()
+        base_prompt = f"辩论即将结束。以下是辩论的主要内容：\n\n{context}\n\n请进行正方的总结陈词，概括己方论点，回应对方关键质疑，做出有力收束。"
+        yield from self._stream_debater(
+            self.pro_debaters[2], base_prompt, context, "总结陈词", "正方",
+        )
+
+        # === Phase 6: Host closing ===
+        yield from self._stream_agent(
+            self.host, "辩论已结束，请做简短的结束语，感谢双方辩手。控制在80字以内。",
+            "主持人", "结束", "主持人",
+        )
+
+        # === Phase 7: Judge evaluation (streamed) ===
+        self.state.current_phase = "评委点评"
+        transcript = self.state.transcript
+        judge_prompt = f"""以下是完整的辩论记录：
+
+{transcript}
+
+请根据评判标准对这场辩论进行点评和打分。请按以下格式输出：
+
+### 正方点评
+（亮点与不足）
+
+### 反方点评
+（亮点与不足）
+
+### 评分
+| 维度 | 正方得分 | 反方得分 |
+|------|---------|---------|
+| 论点质量 | /30 | /30 |
+| 逻辑严密性 | /25 | /25 |
+| 回应能力 | /25 | /25 |
+| 表达与风度 | /20 | /20 |
+| **总分** | **/100** | **/100** |
+
+### 最终判定
+（宣布获胜方及理由）"""
+        yield from self._stream_agent(self.judge, judge_prompt, "评委", "评委点评", "评委")
+
+        # === Phase 8: Audience voting (not streamed — needs JSON parsing) ===
+        self.state.current_phase = "观众投票"
+        for member in self.audience:
+            raw_text, vote_result = member.vote(transcript)
+            if vote_result:
+                self.vote_results.append(vote_result)
+                display = self._format_vote_display(vote_result)
+            else:
+                display = raw_text
             msg = self._add_message(member.name, display, "观众投票", "观众")
             msg.vote_result = vote_result
             yield msg
