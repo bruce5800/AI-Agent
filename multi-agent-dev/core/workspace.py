@@ -15,6 +15,20 @@ def sanitize_name(name: str) -> str:
     return name[:50] or "project"
 
 
+def derive_project_slug(requirement: str, max_chars: int = 30) -> str:
+    """Build a meaningful workspace slug from a free-form requirement string.
+
+    Strategy: take the first `max_chars` of the requirement, sanitize, prepend
+    a short timestamp so repeated runs don't all collide on the same slug.
+    Falls back to "project" if requirement is empty.
+    """
+    import time
+    head = (requirement or "").strip()[:max_chars]
+    base = sanitize_name(head) or "project"
+    stamp = time.strftime("%m%d_%H%M%S")
+    return f"{base}_{stamp}"
+
+
 def create_workspace(project_name: str) -> str:
     """Create a new workspace directory. Returns the absolute path."""
     safe_name = sanitize_name(project_name)

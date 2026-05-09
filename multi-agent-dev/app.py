@@ -37,6 +37,8 @@ if "finished" not in st.session_state:
     st.session_state.finished = False
 if "engine_generator" not in st.session_state:
     st.session_state.engine_generator = None
+if "engine" not in st.session_state:
+    st.session_state.engine = None
 if "pending_approval" not in st.session_state:
     st.session_state.pending_approval = None
 if "workspace_path" not in st.session_state:
@@ -85,6 +87,96 @@ for msg in st.session_state.messages:
         last_phase = msg.phase
     render_message(msg)
 
+
+def consume_generator(gen, send_value=None):
+    """Drive a DevEngine generator and stream messages to the UI.
+
+    If `send_value` is provided, the first step is `gen.send(send_value)` to
+    resume from an approval gate; otherwise iteration starts at the top.
+
+    Pauses (returns) when an approval-required message is encountered, after
+    storing it in `st.session_state.pending_approval` and triggering rerun.
+    """
+    last_phase_local = None
+    current_placeholder = None
+    current_accumulated = ""
+    current_speaker = None
+    current_header_html = ""
+
+    try:
+        if send_value is not None:
+            first = gen.send(send_value)
+            iterator = _chain_first(first, gen)
+        else:
+            iterator = gen
+
+        for msg in iterator:
+            # --- Approval gate: pause ---
+            if msg.requires_approval:
+                st.session_state.pending_approval = msg
+                st.info(f"⏸️ {msg.content}")
+                st.rerun()
+                return  # not reached (rerun raises), but explicit
+
+            if msg.is_chunk:
+                # New speaker / first chunk: open a fresh container
+                if msg.speaker != current_speaker or current_placeholder is None:
+                    if msg.phase != last_phase_local:
+                        render_phase_divider(msg.phase)
+                        last_phase_local = msg.phase
+                    current_header_html = render_message_header(msg.speaker)
+                    current_container = st.container(border=True)
+                    current_placeholder = current_container.empty()
+                    current_accumulated = ""
+                    current_speaker = msg.speaker
+
+                current_accumulated += msg.content
+                current_placeholder.markdown(
+                    current_header_html + "\n\n" + current_accumulated,
+                    unsafe_allow_html=True,
+                )
+            else:
+                # Complete (non-chunk) message
+                if msg.speaker == current_speaker and current_placeholder is not None:
+                    if msg.msg_type == MessageType.TEXT:
+                        current_placeholder.markdown(
+                            current_header_html + "\n\n" + msg.content,
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    if msg.phase != last_phase_local:
+                        render_phase_divider(msg.phase)
+                        last_phase_local = msg.phase
+                    render_message(msg)
+
+                st.session_state.messages.append(msg)
+                current_placeholder = None
+                current_accumulated = ""
+                current_speaker = None
+
+    except StopIteration:
+        pass
+
+    # Generator exhausted (not paused at approval) → mark finished.
+    # Read workspace_path from the live engine (it's only populated after
+    # the first phase yield, so we can't capture it before iteration starts).
+    if not st.session_state.pending_approval:
+        engine = st.session_state.get("engine")
+        if engine is not None:
+            st.session_state.workspace_path = engine.state.workspace_path
+        st.session_state.running = False
+        st.session_state.finished = True
+        st.session_state.engine_generator = None
+        st.session_state.engine = None
+        st.balloons()
+
+
+def _chain_first(first, gen):
+    """Yield `first` then everything else from `gen`."""
+    yield first
+    yield from gen
+
+
 # --- Approval handling ---
 if st.session_state.pending_approval:
     approval_msg = st.session_state.pending_approval
@@ -105,68 +197,7 @@ if st.session_state.pending_approval:
 elif st.session_state.running and st.session_state.engine_generator and "approval_result" in st.session_state:
     gen = st.session_state.engine_generator
     approval = st.session_state.pop("approval_result", "approved")
-
-    last_phase_resume = None
-    current_placeholder = None
-    current_accumulated = ""
-    current_speaker = None
-    current_header_html = ""
-
-    try:
-        # Send approval result back into the generator
-        msg = gen.send(approval)
-
-        # Process the first message from send(), then continue iterating
-        from itertools import chain
-        for msg in chain([msg], gen):
-            if msg.requires_approval:
-                st.session_state.pending_approval = msg
-                st.info(f"⏸️ {msg.content}")
-                st.rerun()
-                break
-
-            if msg.is_chunk:
-                if msg.speaker != current_speaker or current_placeholder is None:
-                    if msg.phase != last_phase_resume:
-                        render_phase_divider(msg.phase)
-                        last_phase_resume = msg.phase
-                    current_header_html = render_message_header(msg.speaker)
-                    current_container = st.container(border=True)
-                    current_placeholder = current_container.empty()
-                    current_accumulated = ""
-                    current_speaker = msg.speaker
-
-                current_accumulated += msg.content
-                current_placeholder.markdown(
-                    current_header_html + "\n\n" + current_accumulated,
-                    unsafe_allow_html=True,
-                )
-            else:
-                if msg.speaker == current_speaker and current_placeholder is not None:
-                    if msg.msg_type == MessageType.TEXT:
-                        current_placeholder.markdown(
-                            current_header_html + "\n\n" + msg.content,
-                            unsafe_allow_html=True,
-                        )
-                else:
-                    if msg.phase != last_phase_resume:
-                        render_phase_divider(msg.phase)
-                        last_phase_resume = msg.phase
-                    render_message(msg)
-
-                st.session_state.messages.append(msg)
-                current_placeholder = None
-                current_accumulated = ""
-                current_speaker = None
-
-    except StopIteration:
-        pass
-
-    if not st.session_state.pending_approval:
-        st.session_state.running = False
-        st.session_state.finished = True
-        st.session_state.engine_generator = None
-        st.balloons()
+    consume_generator(gen, send_value=approval)
 
 # --- Input & Start ---
 if not st.session_state.running and not st.session_state.pending_approval:
@@ -190,6 +221,7 @@ if not st.session_state.running and not st.session_state.pending_approval:
             st.session_state.running = False
             st.session_state.finished = False
             st.session_state.engine_generator = None
+            st.session_state.engine = None
             st.session_state.pending_approval = None
             st.session_state.workspace_path = ""
             st.rerun()
@@ -201,72 +233,10 @@ if not st.session_state.running and not st.session_state.pending_approval:
 
         engine = DevEngine(requirement)
         gen = engine.run()
+        st.session_state.engine = engine
         st.session_state.engine_generator = gen
-        st.session_state.workspace_path = engine.state.workspace_path
 
-        # --- Streaming render loop ---
-        last_phase = None
-        current_placeholder = None
-        current_accumulated = ""
-        current_speaker = None
-        current_header_html = ""
-
-        try:
-            for msg in gen:
-                # Approval gate — pause the generator
-                if msg.requires_approval:
-                    st.session_state.pending_approval = msg
-                    st.info(f"⏸️ {msg.content}")
-                    st.rerun()
-                    break
-
-                if msg.is_chunk:
-                    # --- Streaming delta ---
-                    if msg.speaker != current_speaker or current_placeholder is None:
-                        if msg.phase != last_phase:
-                            render_phase_divider(msg.phase)
-                            last_phase = msg.phase
-                        current_header_html = render_message_header(msg.speaker)
-                        current_container = st.container(border=True)
-                        current_placeholder = current_container.empty()
-                        current_accumulated = ""
-                        current_speaker = msg.speaker
-
-                    current_accumulated += msg.content
-                    current_placeholder.markdown(
-                        current_header_html + "\n\n" + current_accumulated,
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    # --- Complete message ---
-                    if msg.speaker == current_speaker and current_placeholder is not None:
-                        if msg.msg_type == MessageType.TEXT:
-                            current_placeholder.markdown(
-                                current_header_html + "\n\n" + msg.content,
-                                unsafe_allow_html=True,
-                            )
-                    else:
-                        if msg.phase != last_phase:
-                            render_phase_divider(msg.phase)
-                            last_phase = msg.phase
-                        render_message(msg)
-
-                    st.session_state.messages.append(msg)
-
-                    # Reset streaming state
-                    current_placeholder = None
-                    current_accumulated = ""
-                    current_speaker = None
-
-        except StopIteration:
-            pass
-
-        # Check if generator exhausted (not paused at approval)
-        if not st.session_state.pending_approval:
-            st.session_state.running = False
-            st.session_state.finished = True
-            st.session_state.engine_generator = None
-            st.balloons()
+        consume_generator(gen)
 
 # Show workspace path when finished
 if st.session_state.finished and st.session_state.workspace_path:

@@ -4,6 +4,7 @@ Uses a generator pattern (like the debate engine) to yield DevMessage
 objects for real-time streaming in the Streamlit UI.
 """
 
+import re
 from typing import Generator
 
 from agents.pm import PMAgent
@@ -11,8 +12,25 @@ from agents.architect import ArchitectAgent
 from agents.programmer import ProgrammerAgent
 from agents.reviewer import ReviewerAgent
 from core.models import DevMessage, DevState, Phase, MessageType
-from core.workspace import create_workspace
+from core.workspace import create_workspace, derive_project_slug
 from mcp_servers.filesystem_server import read_file, list_directory
+
+
+_RESULT_MARKER = re.compile(r"<<<RESULT:\s*(pass|fail)\s*>>>", re.IGNORECASE)
+
+
+def _parse_review_result(text: str) -> str:
+    """Parse the structured `<<<RESULT: pass|fail>>>` marker.
+
+    Returns "pass" or "fail". If no marker is present, defaults to "fail"
+    (safer — forces another fix loop iteration rather than a false success).
+    """
+    if not text:
+        return "fail"
+    matches = _RESULT_MARKER.findall(text)
+    if not matches:
+        return "fail"
+    return matches[-1].lower()
 
 
 class DevEngine:
@@ -58,9 +76,13 @@ class DevEngine:
         self.state.current_phase = Phase.REQUIREMENT
         yield self._phase_msg(Phase.REQUIREMENT, "开始需求分析...")
 
-        # We'll create workspace after PM gives us a project name
-        # For now, use a temp workspace
-        workspace = create_workspace("temp_project")
+        # Derive a meaningful workspace name from the user's requirement
+        # (rather than the placeholder "temp_project"). PM may write a
+        # nicer name into requirements.md; we surface it in the summary
+        # but don't rename the dir to avoid mid-flight path churn.
+        project_slug = derive_project_slug(self.state.raw_requirement)
+        workspace = create_workspace(project_slug)
+        self.state.project_name = project_slug
         self.state.workspace_path = workspace
 
         # === Phase 2: Requirement Analysis (PM) ===
@@ -129,7 +151,11 @@ class DevEngine:
         self.state.error_count = 0
 
         while self.state.error_count < self.state.max_retries:
-            review_prompt = "请检查项目结构，安装依赖，运行项目或测试，报告结果。"
+            review_prompt = (
+                "请检查项目结构，安装依赖，**用 run_command 实际执行**项目或测试，"
+                "并按系统提示词中的格式输出报告，**最后一行必须是 "
+                "`<<<RESULT: pass>>>` 或 `<<<RESULT: fail>>>`**。"
+            )
 
             review_text = ""
             for msg in reviewer.run_with_tools(review_prompt, Phase.TESTING):
@@ -140,8 +166,10 @@ class DevEngine:
 
             self.state.test_output = review_text
 
-            # Check if tests passed
-            if "✅" in review_text or "通过" in review_text or "success" in review_text.lower():
+            # Structured pass/fail: parse the trailing <<<RESULT: ...>>> marker.
+            # If marker is missing, default to "fail" — safer than a false pass.
+            verdict = _parse_review_result(review_text)
+            if verdict == "pass":
                 break
 
             # Tests failed — programmer fixes
