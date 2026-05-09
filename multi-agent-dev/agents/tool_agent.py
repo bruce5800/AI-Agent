@@ -2,6 +2,24 @@
 
 This is the core component: an agent that can autonomously call tools
 (read/write files, run commands, etc.) in a loop until it produces a final answer.
+
+Streaming model
+---------------
+Each LLM round is a single `stream=True` call. We accumulate two things from
+the chunk stream:
+  - `accumulated_content`: text deltas (yielded to the UI as they arrive)
+  - `accumulated_tool_calls`: tool-call deltas merged by `index`
+
+If the round emits any tool_calls, we execute them and loop again. Otherwise
+the accumulated content is the final answer and we break out.
+
+History
+-------
+`self.history` stores the **full OpenAI-format conversation** including
+intermediate `assistant`-with-`tool_calls` messages and their matching `tool`
+result messages. This keeps the agent coherent across multiple
+`run_with_tools` invocations (e.g. the test-fix loop) — it remembers which
+files it already read/wrote, instead of re-discovering on every iteration.
 """
 
 import json
@@ -13,13 +31,32 @@ from core.models import DevMessage, Phase, MessageType, ToolCall
 from mcp_servers.registry import get_openai_functions_for_role, execute_tool
 
 
+def _merge_tool_call_delta(slots: list[dict], tc_delta) -> None:
+    """Merge a single streamed tool_call delta into `slots`, indexed by `tc_delta.index`."""
+    idx = tc_delta.index
+    while len(slots) <= idx:
+        slots.append({
+            "id": "",
+            "type": "function",
+            "function": {"name": "", "arguments": ""},
+        })
+    slot = slots[idx]
+    if getattr(tc_delta, "id", None):
+        slot["id"] = tc_delta.id
+    if getattr(tc_delta, "type", None):
+        slot["type"] = tc_delta.type
+    fn = getattr(tc_delta, "function", None)
+    if fn is not None:
+        if getattr(fn, "name", None):
+            slot["function"]["name"] += fn.name
+        if getattr(fn, "arguments", None):
+            slot["function"]["arguments"] += fn.arguments
+
+
 class ToolAgent(BaseAgent):
     """Agent with MCP tool-calling capabilities.
 
-    Extends BaseAgent with a tool-calling loop:
-    1. Call LLM with available tools
-    2. If LLM requests tool calls → execute them → feed results back → repeat
-    3. If LLM produces final text → stream it out
+    Single streaming LLM call per round; tool_calls accumulated from delta chunks.
     """
 
     def __init__(self, name: str, role: str, system_prompt: str, workspace: str):
@@ -38,37 +75,67 @@ class ToolAgent(BaseAgent):
         Yields DevMessage for each event (tool calls, tool results, streaming text).
         Returns the final complete text response.
         """
+        # Start from system + accumulated history + new user message.
         messages = [{"role": "system", "content": self.system_prompt}]
         messages.extend(self.history)
         messages.append({"role": "user", "content": user_message})
 
-        full_reply = ""
+        final_text = ""
+        finished = False
 
-        for iteration in range(MAX_TOOL_ITERATIONS):
-            response = self.client.chat.completions.create(
+        for _ in range(MAX_TOOL_ITERATIONS):
+            stream = self.client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,
-                tools=self.tools if self.tools else None,
+                tools=self.tools or None,
                 tool_choice="auto" if self.tools else None,
                 temperature=0.7,
                 max_tokens=4000,
+                stream=True,
             )
 
-            choice = response.choices[0]
+            accumulated_content = ""
+            accumulated_tool_calls: list[dict] = []
 
-            # --- Handle tool calls ---
-            if choice.message.tool_calls:
-                # Append assistant message with tool calls
-                messages.append(choice.message.model_dump())
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
 
-                for tc in choice.message.tool_calls:
-                    tool_name = tc.function.name
+                # Stream text deltas to UI as soon as they arrive.
+                if getattr(delta, "content", None):
+                    accumulated_content += delta.content
+                    yield DevMessage(
+                        speaker=self.name,
+                        content=delta.content,
+                        phase=phase,
+                        msg_type=MessageType.TEXT,
+                        is_chunk=True,
+                    )
+
+                # Merge tool_call deltas into their index slots.
+                if getattr(delta, "tool_calls", None):
+                    for tc_delta in delta.tool_calls:
+                        _merge_tool_call_delta(accumulated_tool_calls, tc_delta)
+
+            # --- Decide branch: tool calls vs. final text ---
+            if accumulated_tool_calls:
+                # Append the assistant message that requested the tool calls.
+                # OpenAI spec allows null content alongside tool_calls.
+                messages.append({
+                    "role": "assistant",
+                    "content": accumulated_content or None,
+                    "tool_calls": accumulated_tool_calls,
+                })
+
+                for tc in accumulated_tool_calls:
+                    tool_name = tc["function"]["name"]
+                    raw_args = tc["function"]["arguments"] or "{}"
                     try:
-                        tool_args = json.loads(tc.function.arguments or "{}")
+                        tool_args = json.loads(raw_args)
                     except json.JSONDecodeError:
                         tool_args = {}
 
-                    # Yield tool call event
                     yield DevMessage(
                         speaker=self.name,
                         content=f"调用工具: {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:200]})",
@@ -77,17 +144,14 @@ class ToolAgent(BaseAgent):
                         metadata={"tool_name": tool_name, "tool_args": tool_args},
                     )
 
-                    # Execute the tool
                     result = execute_tool(self.workspace, tool_name, tool_args)
 
-                    # Track tool call
                     tool_call_record = ToolCall(
                         tool_name=tool_name,
                         arguments=tool_args,
                         result=result[:500] if result else None,
                     )
 
-                    # Yield tool result event
                     yield DevMessage(
                         speaker=self.name,
                         content=result[:500] if result else "(empty result)",
@@ -96,7 +160,6 @@ class ToolAgent(BaseAgent):
                         metadata={"tool_name": tool_name, "tool_call": tool_call_record},
                     )
 
-                    # If it was a write_file, also yield a file change event
                     if tool_name == "write_file" and "path" in tool_args:
                         yield DevMessage(
                             speaker=self.name,
@@ -106,56 +169,44 @@ class ToolAgent(BaseAgent):
                             metadata={"file_path": tool_args["path"]},
                         )
 
-                    # Append tool result to messages
                     messages.append({
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": tc["id"],
                         "content": result or "",
                     })
 
-                # Continue loop — LLM will process tool results
+                # Continue loop — LLM will process tool results in next round.
                 continue
 
-            # --- Final text response (no more tool calls) ---
-            final_text = choice.message.content or ""
-            full_reply = final_text.strip()
+            # --- No tool calls: this is the final answer ---
+            final_text = accumulated_content.strip()
 
-            # Stream the final text token by token
-            # (Re-call with stream=True for the same messages to get streaming)
-            if full_reply:
-                stream = self.client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=4000,
-                    stream=True,
-                )
-                streamed_text = ""
-                for chunk in stream:
-                    delta = chunk.choices[0].delta.content or ""
-                    if delta:
-                        streamed_text += delta
-                        yield DevMessage(
-                            speaker=self.name,
-                            content=delta,
-                            phase=phase,
-                            msg_type=MessageType.TEXT,
-                            is_chunk=True,
-                        )
-                full_reply = streamed_text.strip() or full_reply
-
-            # Yield complete message
+            # Emit the consolidated (non-chunk) final message so engine.py
+            # can capture it as `review_text` etc.
             yield DevMessage(
                 speaker=self.name,
-                content=full_reply,
+                content=final_text,
                 phase=phase,
                 msg_type=MessageType.TEXT,
                 is_chunk=False,
             )
+
+            messages.append({"role": "assistant", "content": final_text})
+            finished = True
             break
 
-        # Save to history
-        self.history.append({"role": "user", "content": user_message})
-        self.history.append({"role": "assistant", "content": full_reply})
+        if not finished:
+            # Hit MAX_TOOL_ITERATIONS without converging.
+            yield DevMessage(
+                speaker=self.name,
+                content=f"(达到最大工具调用次数 {MAX_TOOL_ITERATIONS}，提前结束)",
+                phase=phase,
+                msg_type=MessageType.ERROR,
+                is_chunk=False,
+            )
 
-        return full_reply
+        # Persist the full expanded conversation (drop the system message at [0]).
+        # Next run_with_tools call will see all prior tool calls and results.
+        self.history = messages[1:]
+
+        return final_text
