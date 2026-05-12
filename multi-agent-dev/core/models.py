@@ -34,6 +34,7 @@ class MessageType(str, Enum):
     APPROVAL_REQUEST = "approval_request"
     ERROR = "error"
     PHASE_TRANSITION = "phase_transition"
+    ROUTE = "route"  # mailbox routing event (TeamMessage → bus)
 
 
 @dataclass

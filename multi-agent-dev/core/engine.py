@@ -1,46 +1,56 @@
-"""DevEngine — orchestrates the multi-agent development flow.
+"""DevEngine — bus-driven router for the multi-agent development flow.
 
-Uses a generator pattern (like the debate engine) to yield DevMessage
-objects for real-time streaming in the Streamlit UI.
+The old version was a hard-coded 7-phase pipeline:
+    PM → [approve] → Architect → [approve] → Programmer → Reviewer ↔ Programmer → git → summary
+
+That made it impossible for Reviewer to bounce a requirements problem back to
+PM, or for the order to change at all without editing this file.
+
+This version is a **router loop** over an in-memory ``MessageBus``. Each agent
+implements ``handle(inbox)`` which decides what to do and where to send the
+result next (via ``TeamMessage``). The engine just:
+
+1. drain the next non-empty inbox (User first, then PM/Architect/Programmer/Reviewer)
+2. dispatch to that agent
+3. yield UI events; route any ``TeamMessage`` back through the bus
+4. if it's an ``approval_request`` to ``User``, pause the generator at an
+   approval gate (same ``yield approval_msg`` mechanism the UI already speaks)
+5. terminate on a ``done`` message
+
+Adding a dynamic edge — e.g. Reviewer → PM escalation — is now just a matter
+of having Reviewer emit a ``TeamMessage(recipient="PM", msg_type="escalation")``.
+No engine changes needed.
 """
 
-import re
+import os
 from typing import Generator
 
 from agents.pm import PMAgent
 from agents.architect import ArchitectAgent
 from agents.programmer import ProgrammerAgent
 from agents.reviewer import ReviewerAgent
-from core.models import DevMessage, DevState, Phase, MessageType
+from core.bus import MessageBus, TeamMessage
+from core.models import DevMessage, DevState, MessageType, Phase
 from core.workspace import create_workspace, derive_project_slug
-from mcp_servers.filesystem_server import read_file, list_directory
+from mcp_servers.filesystem_server import list_directory
 
 
-_RESULT_MARKER = re.compile(r"<<<RESULT:\s*(pass|fail)\s*>>>", re.IGNORECASE)
-
-
-def _parse_review_result(text: str) -> str:
-    """Parse the structured `<<<RESULT: pass|fail>>>` marker.
-
-    Returns "pass" or "fail". If no marker is present, defaults to "fail"
-    (safer — forces another fix loop iteration rather than a false success).
-    """
-    if not text:
-        return "fail"
-    matches = _RESULT_MARKER.findall(text)
-    if not matches:
-        return "fail"
-    return matches[-1].lower()
+# Hard cap so a buggy escalation loop can't run forever.
+MAX_BUS_STEPS = 40
 
 
 class DevEngine:
-    """Orchestrates the full development process across 7 phases."""
+    """Drives a MessageBus of cooperating agents until the pipeline terminates."""
 
     def __init__(self, requirement: str):
         self.state = DevState(raw_requirement=requirement)
+        self.bus = MessageBus()
+        self.agents: dict = {}
+        self._workspace: str = ""
+
+    # ----- DevMessage helpers (unchanged from previous version) -----
 
     def _phase_msg(self, phase: Phase, content: str) -> DevMessage:
-        """Create a system phase transition message."""
         return DevMessage(
             speaker="System",
             content=content,
@@ -49,7 +59,6 @@ class DevEngine:
         )
 
     def _approval_msg(self, phase: Phase, content: str) -> DevMessage:
-        """Create an approval request message."""
         return DevMessage(
             speaker="System",
             content=content,
@@ -58,168 +67,175 @@ class DevEngine:
             requires_approval=True,
         )
 
+    def _route_msg(self, tm: TeamMessage, phase: Phase) -> DevMessage:
+        """Render a peer-to-peer routing event in the UI feed."""
+        return DevMessage(
+            speaker="System",
+            content=f"📨 {tm.sender} → {tm.recipient} ({tm.msg_type})",
+            phase=phase,
+            msg_type=MessageType.ROUTE,
+            metadata={"team_message": tm},
+        )
+
+    # ----- Main router loop -----
+
     def run(self) -> Generator[DevMessage, str | None, None]:
-        """Run the full development pipeline.
-
-        This is a generator that yields DevMessage objects.
-        At approval gates, it yields an approval_request message and
-        expects the caller to send() the approval result:
-          - "approved" to continue
-          - "edit:..." to pass edited content
-          - "regenerate" to re-run the phase
-
-        Yields:
-            DevMessage objects for UI rendering
-        """
-
-        # === Phase 1: Create workspace ===
+        # --- Bootstrap workspace + agents ---
         self.state.current_phase = Phase.REQUIREMENT
         yield self._phase_msg(Phase.REQUIREMENT, "开始需求分析...")
 
-        # Derive a meaningful workspace name from the user's requirement
-        # (rather than the placeholder "temp_project"). PM may write a
-        # nicer name into requirements.md; we surface it in the summary
-        # but don't rename the dir to avoid mid-flight path churn.
-        project_slug = derive_project_slug(self.state.raw_requirement)
-        workspace = create_workspace(project_slug)
-        self.state.project_name = project_slug
-        self.state.workspace_path = workspace
+        slug = derive_project_slug(self.state.raw_requirement)
+        self._workspace = create_workspace(slug)
+        self.state.project_name = slug
+        self.state.workspace_path = self._workspace
 
-        # === Phase 2: Requirement Analysis (PM) ===
-        pm = PMAgent(workspace)
-        prompt = f"用户需求：{self.state.raw_requirement}\n\n请分析需求并生成需求文档。"
+        self.agents = {
+            "PM": PMAgent(self._workspace),
+            "Architect": ArchitectAgent(self._workspace),
+            "Programmer": ProgrammerAgent(self._workspace),
+            "Reviewer": ReviewerAgent(self._workspace),
+        }
 
-        for msg in pm.run_with_tools(prompt, Phase.REQUIREMENT):
-            self.state.messages.append(msg)
-            yield msg
+        # Kick off: User assigns initial task to PM.
+        self.bus.send(TeamMessage(
+            sender="User",
+            recipient="PM",
+            msg_type="task",
+            content=self.state.raw_requirement,
+            metadata={"phase": Phase.REQUIREMENT.value},
+        ))
 
-        # Read the generated requirement doc
-        self.state.requirement_doc = read_file(workspace, "requirements.md")
+        # Priority queue: handle User approvals first (so UI doesn't queue up
+        # peer chatter behind a pending approval), then agents in pipeline order.
+        priority = ["User", "PM", "Architect", "Programmer", "Reviewer"]
 
-        # Approval gate
-        approval = yield self._approval_msg(
-            Phase.REQUIREMENT,
-            "需求文档已生成，请审阅。",
-        )
-        if approval and approval.startswith("edit:"):
-            self.state.requirement_doc = approval[5:]
-
-        # === Phase 3: Architecture Design (Architect) ===
-        self.state.current_phase = Phase.DESIGN
-        yield self._phase_msg(Phase.DESIGN, "开始架构设计...")
-
-        architect = ArchitectAgent(workspace)
-        prompt = (
-            f"以下是需求文档：\n\n{self.state.requirement_doc}\n\n"
-            f"请设计技术方案并创建项目目录结构。"
-        )
-
-        for msg in architect.run_with_tools(prompt, Phase.DESIGN):
-            self.state.messages.append(msg)
-            yield msg
-
-        # Read the generated design doc
-        self.state.design_doc = read_file(workspace, "design.md")
-
-        # Approval gate
-        approval = yield self._approval_msg(
-            Phase.DESIGN,
-            "架构设计已完成，请审阅。",
-        )
-        if approval and approval.startswith("edit:"):
-            self.state.design_doc = approval[5:]
-
-        # === Phase 4: Implementation (Programmer) ===
-        self.state.current_phase = Phase.IMPLEMENTATION
-        yield self._phase_msg(Phase.IMPLEMENTATION, "开始编码实现...")
-
-        programmer = ProgrammerAgent(workspace)
-        prompt = (
-            f"以下是设计文档：\n\n{self.state.design_doc}\n\n"
-            f"请按照设计文档逐文件编写代码。"
-        )
-
-        for msg in programmer.run_with_tools(prompt, Phase.IMPLEMENTATION):
-            self.state.messages.append(msg)
-            yield msg
-
-        # === Phase 5: Testing & Fix Loop ===
-        self.state.current_phase = Phase.TESTING
-        yield self._phase_msg(Phase.TESTING, "开始测试验证...")
-
-        reviewer = ReviewerAgent(workspace)
-        self.state.error_count = 0
-
-        while self.state.error_count < self.state.max_retries:
-            review_prompt = (
-                "请检查项目结构，安装依赖，**用 run_command 实际执行**项目或测试，"
-                "并按系统提示词中的格式输出报告，**最后一行必须是 "
-                "`<<<RESULT: pass>>>` 或 `<<<RESULT: fail>>>`**。"
-            )
-
-            review_text = ""
-            for msg in reviewer.run_with_tools(review_prompt, Phase.TESTING):
-                self.state.messages.append(msg)
-                yield msg
-                if not msg.is_chunk and msg.msg_type == MessageType.TEXT:
-                    review_text = msg.content
-
-            self.state.test_output = review_text
-
-            # Structured pass/fail: parse the trailing <<<RESULT: ...>>> marker.
-            # If marker is missing, default to "fail" — safer than a false pass.
-            verdict = _parse_review_result(review_text)
-            if verdict == "pass":
+        for _step in range(MAX_BUS_STEPS):
+            recipient = self.bus.next_pending(priority)
+            if recipient is None:
+                yield self._phase_msg(Phase.SUMMARY, "总线已空，流程结束。")
                 break
 
-            # Tests failed — programmer fixes
-            self.state.error_count += 1
-            if self.state.error_count >= self.state.max_retries:
+            if recipient == "User":
+                done = yield from self._handle_user_inbox()
+                if done:
+                    break
+                continue
+
+            yield from self._dispatch_agent(recipient)
+        else:
+            yield DevMessage(
+                speaker="System",
+                content=f"达到最大调度步数 {MAX_BUS_STEPS}，强制结束。",
+                phase=Phase.SUMMARY,
+                msg_type=MessageType.ERROR,
+            )
+
+        yield from self._emit_summary()
+        self.state.is_finished = True
+
+    # ----- Inbox-specific handlers -----
+
+    def _handle_user_inbox(self) -> Generator[DevMessage, str | None, bool]:
+        """Process messages addressed to User. Returns True if pipeline is done."""
+        for m in self.bus.drain("User"):
+            phase = Phase(m.metadata.get("phase", Phase.IDLE.value))
+            self.state.current_phase = phase
+
+            if m.msg_type == "done":
+                yield self._phase_msg(Phase.SUMMARY, "✅ 已交付。")
+                self.state.test_output = m.metadata.get("test_result", "")
+                return True
+
+            if m.msg_type != "approval_request":
+                # Unknown message to User — surface it but keep going.
                 yield DevMessage(
                     speaker="System",
-                    content=f"已重试 {self.state.max_retries} 次，仍有问题。请手动检查。",
-                    phase=Phase.TESTING,
+                    content=f"(忽略未知消息: {m.msg_type})",
+                    phase=phase,
                     msg_type=MessageType.ERROR,
                 )
-                break
+                continue
 
-            yield self._phase_msg(
-                Phase.TESTING,
-                f"发现问题，程序员修复中...（第 {self.state.error_count} 次修复）",
-            )
+            # --- Approval gate ---
+            next_agent = m.metadata.get("next_agent", "")
+            approval = yield self._approval_msg(phase, m.content)
 
-            fix_prompt = (
-                f"测试/审查发现以下问题：\n\n{review_text}\n\n"
-                f"请读取相关文件，修复代码。"
-            )
-            for msg in programmer.run_with_tools(fix_prompt, Phase.TESTING):
-                self.state.messages.append(msg)
-                yield msg
+            edited_content = m.content
+            if approval and approval.startswith("edit:"):
+                edited_content = approval[5:]
+                approval_kind = "approved"
+            else:
+                approval_kind = approval or "approved"
 
-        # === Phase 6: Git Commit ===
-        self.state.current_phase = Phase.GIT_COMMIT
-        yield self._phase_msg(Phase.GIT_COMMIT, "提交代码到 Git...")
+            if approval_kind == "regenerate":
+                # Send it back to the sender, marked regenerate.
+                self.bus.send(TeamMessage(
+                    sender="User",
+                    recipient=m.sender,
+                    msg_type="task",
+                    content=self.state.raw_requirement,
+                    metadata={"phase": phase.value, "regenerate": True},
+                ))
+            else:
+                # Approved — pass the (possibly edited) content to next_agent.
+                if not next_agent:
+                    yield DevMessage(
+                        speaker="System",
+                        content=f"(approval_request 缺少 next_agent，丢弃)",
+                        phase=phase,
+                        msg_type=MessageType.ERROR,
+                    )
+                    continue
+                self.bus.send(TeamMessage(
+                    sender="User",
+                    recipient=next_agent,
+                    msg_type="task",
+                    content=edited_content,
+                    metadata={"phase": _next_phase_for(next_agent).value},
+                ))
 
-        git_prompt = "请初始化 git 仓库，添加所有文件并提交，commit 信息为 'Initial commit: {project}'。"
-        for msg in programmer.run_with_tools(git_prompt, Phase.GIT_COMMIT):
-            self.state.messages.append(msg)
-            yield msg
+            # Stash for summary
+            if phase == Phase.REQUIREMENT:
+                self.state.requirement_doc = edited_content
+            elif phase == Phase.DESIGN:
+                self.state.design_doc = edited_content
 
-        # === Phase 7: Summary ===
-        self.state.current_phase = Phase.SUMMARY
-        yield self._phase_msg(Phase.SUMMARY, "生成项目交付总结...")
+        return False
 
-        # Get final file tree
-        file_tree = list_directory(workspace)
+    def _dispatch_agent(self, name: str) -> Generator[DevMessage, None, None]:
+        """Run one agent against its drained inbox."""
+        inbox = self.bus.drain(name)
+        if not inbox:
+            return
+
+        phase = Phase(inbox[-1].metadata.get("phase", Phase.IDLE.value))
+        self.state.current_phase = phase
+        yield self._phase_msg(phase, f"→ {name} 处理 {len(inbox)} 条消息")
+
+        agent = self.agents[name]
+        for output in agent.handle(inbox):
+            if isinstance(output, DevMessage):
+                self.state.messages.append(output)
+                yield output
+            elif isinstance(output, TeamMessage):
+                self.bus.send(output)
+                yield self._route_msg(output, phase)
+            # else: ignore (shouldn't happen, but stay robust)
+
+    def _emit_summary(self) -> Generator[DevMessage, None, None]:
+        if not os.path.isdir(self._workspace):
+            return
+        try:
+            tree = list_directory(self._workspace)
+        except Exception as e:
+            tree = f"(无法列出文件: {e})"
 
         summary = (
-            f"## 项目交付完成\n\n"
-            f"**项目路径：** `{workspace}`\n\n"
-            f"**文件结构：**\n```\n{file_tree}\n```\n\n"
-            f"**测试结果：** {self.state.test_output[:200] if self.state.test_output else '未执行测试'}\n\n"
-            f"**修复次数：** {self.state.error_count}\n"
+            f"## 项目交付\n\n"
+            f"**workspace：** `{self._workspace}`\n\n"
+            f"**文件结构：**\n```\n{tree}\n```\n\n"
+            f"**总线消息总数：** {len(self.bus.audit)}\n"
         )
-
         yield DevMessage(
             speaker="System",
             content=summary,
@@ -227,4 +243,15 @@ class DevEngine:
             msg_type=MessageType.TEXT,
         )
 
-        self.state.is_finished = True
+
+def _next_phase_for(agent_name: str) -> Phase:
+    """Map a recipient agent to the phase its task represents.
+
+    Kept tiny on purpose — adding a new agent only requires adding one row.
+    """
+    return {
+        "PM": Phase.REQUIREMENT,
+        "Architect": Phase.DESIGN,
+        "Programmer": Phase.IMPLEMENTATION,
+        "Reviewer": Phase.TESTING,
+    }.get(agent_name, Phase.IDLE)

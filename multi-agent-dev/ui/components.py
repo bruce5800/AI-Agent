@@ -62,6 +62,14 @@ def render_message(msg: DevMessage):
         )
         return
 
+    if msg.msg_type == MessageType.ROUTE:
+        # Inline mailbox routing notice — keep visually quiet.
+        st.markdown(
+            f'<div class="file-change" style="opacity:0.75">{msg.content}</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
     if msg.msg_type == MessageType.ERROR:
         st.error(f"❌ {msg.content}")
         return
