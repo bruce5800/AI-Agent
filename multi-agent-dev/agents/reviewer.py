@@ -72,12 +72,16 @@ class ReviewerAgent(ToolAgent):
 
         # --- Normal routing ---
         if verdict == "pass":
+            # Hand directly to User as `done` — the engine handles git
+            # lifecycle (initial commit on main, squash-merging any active
+            # fix worktree). Removes a redundant Programmer hop that used
+            # to just shell out to `git`.
             yield TeamMessage(
                 sender="Reviewer",
-                recipient="Programmer",
-                msg_type="task",
-                content="测试通过，请 git init/add/commit 提交代码。",
-                metadata={"phase": Phase.GIT_COMMIT.value},
+                recipient="User",
+                msg_type="done",
+                content=f"测试通过 ✅\n\n{review_text}",
+                metadata={"phase": Phase.SUMMARY.value, "test_result": "pass"},
             )
             return
 

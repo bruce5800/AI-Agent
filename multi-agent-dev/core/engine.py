@@ -32,6 +32,7 @@ from agents.reviewer import ReviewerAgent
 from core.bus import MessageBus, TeamMessage
 from core.models import DevMessage, DevState, MessageType, Phase
 from core.workspace import create_workspace, derive_project_slug
+from core.worktree import WorktreeSession
 from mcp_servers.filesystem_server import list_directory
 
 
@@ -47,6 +48,7 @@ class DevEngine:
         self.bus = MessageBus()
         self.agents: dict = {}
         self._workspace: str = ""
+        self.worktree: WorktreeSession | None = None  # set in run()
 
     # ----- DevMessage helpers (unchanged from previous version) -----
 
@@ -88,6 +90,7 @@ class DevEngine:
         self._workspace = create_workspace(slug)
         self.state.project_name = slug
         self.state.workspace_path = self._workspace
+        self.worktree = WorktreeSession(self._workspace)
 
         self.agents = {
             "PM": PMAgent(self._workspace),
@@ -142,6 +145,8 @@ class DevEngine:
             self.state.current_phase = phase
 
             if m.msg_type == "done":
+                # Wrap up: settle any active fix worktree, then summarize.
+                yield from self._finalize_repo(m.metadata.get("test_result", ""))
                 yield self._phase_msg(Phase.SUMMARY, "✅ 已交付。")
                 self.state.test_output = m.metadata.get("test_result", "")
                 return True
@@ -203,7 +208,19 @@ class DevEngine:
         return False
 
     def _dispatch_agent(self, name: str) -> Generator[DevMessage, None, None]:
-        """Run one agent against its drained inbox."""
+        """Run one agent against its drained inbox.
+
+        Wraps the agent's ``handle()`` with three git lifecycle hooks:
+
+        1. **Pre-dispatch fix-mode entry** — if a ``fix_request`` is in the
+           inbox and we have no active worktree, branch one off main's HEAD
+           and redirect the agent's workspace to it.
+        2. **Workspace redirection** — while a fix worktree is active,
+           Programmer/Reviewer operate on the worktree, not main.
+        3. **Post-dispatch hooks** — auto-commit on main after a successful
+           initial implementation; auto-commit in the worktree after each fix
+           attempt; discard the worktree if Reviewer escalates to PM.
+        """
         inbox = self.bus.drain(name)
         if not inbox:
             return
@@ -212,15 +229,114 @@ class DevEngine:
         self.state.current_phase = phase
         yield self._phase_msg(phase, f"→ {name} 处理 {len(inbox)} 条消息")
 
+        # --- Pre-dispatch: enter fix mode if a fix_request just arrived ---
+        is_fix_request = any(m.msg_type == "fix_request" for m in inbox)
+        if (
+            is_fix_request
+            and self.worktree is not None
+            and not self.worktree.is_active()
+        ):
+            yield from self._enter_fix_mode()
+
         agent = self.agents[name]
-        for output in agent.handle(inbox):
-            if isinstance(output, DevMessage):
-                self.state.messages.append(output)
-                yield output
-            elif isinstance(output, TeamMessage):
-                self.bus.send(output)
-                yield self._route_msg(output, phase)
-            # else: ignore (shouldn't happen, but stay robust)
+
+        # --- Workspace redirection ---
+        original_ws = agent.workspace
+        if (
+            self.worktree is not None
+            and self.worktree.is_active()
+            and name in ("Programmer", "Reviewer")
+        ):
+            agent.workspace = self.worktree.path
+            yield self._phase_msg(
+                phase, f"🔀 {name} workspace 切换到 worktree: {self.worktree.path}"
+            )
+
+        pre_audit_len = len(self.bus.audit)
+        try:
+            for output in agent.handle(inbox):
+                if isinstance(output, DevMessage):
+                    self.state.messages.append(output)
+                    yield output
+                elif isinstance(output, TeamMessage):
+                    self.bus.send(output)
+                    yield self._route_msg(output, phase)
+        finally:
+            agent.workspace = original_ws
+
+        new_msgs = self.bus.audit[pre_audit_len:]
+
+        # --- Post-dispatch hooks ---
+
+        # Programmer just finished initial implementation → commit on main.
+        if name == "Programmer" and phase == Phase.IMPLEMENTATION:
+            assert self.worktree is not None
+            yield self._phase_msg(
+                Phase.IMPLEMENTATION,
+                "📦 " + self.worktree.init_main(),
+            )
+            yield self._phase_msg(
+                Phase.IMPLEMENTATION,
+                "📦 " + self.worktree.commit_main("feat: initial implementation"),
+            )
+
+        # Programmer just finished a fix attempt → commit on the fix branch.
+        elif (
+            name == "Programmer"
+            and phase == Phase.TESTING
+            and self.worktree is not None
+            and self.worktree.is_active()
+        ):
+            fix_count = inbox[-1].metadata.get("fix_count", 0) + 1
+            msg = self.worktree.commit_attempt(f"fix: attempt {fix_count}")
+            yield self._phase_msg(Phase.TESTING, f"📦 worktree: {msg}")
+
+        # Reviewer escalated to PM → invalidate the speculative branch.
+        elif name == "Reviewer" and self.worktree is not None and self.worktree.is_active():
+            had_escalation = any(
+                m.recipient == "PM" and m.msg_type == "escalation" for m in new_msgs
+            )
+            if had_escalation:
+                yield from self._exit_fix_mode(merge=False, reason="Reviewer 升级到 PM")
+
+    # ----- Worktree lifecycle helpers -----
+
+    def _enter_fix_mode(self) -> Generator[DevMessage, None, None]:
+        """Branch a worktree off main HEAD; subsequent Programmer/Reviewer
+        dispatches operate on it until exit."""
+        assert self.worktree is not None
+        msg = self.worktree.start()
+        yield self._phase_msg(Phase.TESTING, f"🌿 进入 fix 模式: {msg}")
+
+    def _exit_fix_mode(
+        self, merge: bool, reason: str = ""
+    ) -> Generator[DevMessage, None, None]:
+        """Either squash-merge or discard the active worktree."""
+        assert self.worktree is not None
+        if not self.worktree.is_active():
+            return
+        if merge:
+            out = self.worktree.merge_to_main(
+                "fix: accepted speculative changes (squashed)"
+            )
+            yield self._phase_msg(Phase.GIT_COMMIT, f"✅ 合并 fix worktree: {out}")
+        else:
+            out = self.worktree.discard()
+            reason_suffix = f" ({reason})" if reason else ""
+            yield self._phase_msg(
+                Phase.GIT_COMMIT, f"🗑️  丢弃 fix worktree{reason_suffix}: {out}"
+            )
+
+    def _finalize_repo(
+        self, test_result: str
+    ) -> Generator[DevMessage, None, None]:
+        """Called on User `done` arrival. Settle any active worktree."""
+        if self.worktree is None or not self.worktree.is_active():
+            return
+        if test_result == "pass":
+            yield from self._exit_fix_mode(merge=True)
+        else:
+            yield from self._exit_fix_mode(merge=False, reason=f"test_result={test_result}")
 
     def _emit_summary(self) -> Generator[DevMessage, None, None]:
         if not os.path.isdir(self._workspace):
@@ -230,12 +346,27 @@ class DevEngine:
         except Exception as e:
             tree = f"(无法列出文件: {e})"
 
+        # Git history if we managed to commit anything
+        git_log = ""
+        if self.worktree is not None and self.worktree.is_main_repo():
+            import subprocess
+            r = subprocess.run(
+                ["git", "log", "--oneline", "-10"],
+                cwd=self._workspace,
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode == 0:
+                git_log = r.stdout.strip() or "(no commits)"
+
         summary = (
             f"## 项目交付\n\n"
             f"**workspace：** `{self._workspace}`\n\n"
             f"**文件结构：**\n```\n{tree}\n```\n\n"
             f"**总线消息总数：** {len(self.bus.audit)}\n"
         )
+        if git_log:
+            summary += f"\n**Git 历史：**\n```\n{git_log}\n```\n"
         yield DevMessage(
             speaker="System",
             content=summary,

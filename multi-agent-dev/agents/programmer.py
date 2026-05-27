@@ -48,21 +48,10 @@ class ProgrammerAgent(ToolAgent):
             )
             return
 
-        if phase_str == Phase.GIT_COMMIT.value:
-            prompt = (
-                "请初始化 git 仓库，添加所有文件并提交，"
-                "commit message 形如 'Initial commit: <project>'。"
-            )
-            yield from self.run_with_tools(prompt, Phase.GIT_COMMIT)
-
-            yield TeamMessage(
-                sender="Programmer",
-                recipient="User",
-                msg_type="done",
-                content="代码已提交。",
-                metadata={"phase": Phase.SUMMARY.value, "test_result": "pass"},
-            )
-            return
+        # NOTE: There is no GIT_COMMIT branch anymore. The engine handles all
+        # git lifecycle deterministically (initial commit after impl; squash-
+        # merge or discard of the fix worktree based on Reviewer's verdict).
+        # Programmer only ever does *code*; the engine owns the repo.
 
         # Default: initial implementation
         prompt = (
