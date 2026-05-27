@@ -23,6 +23,8 @@ No engine changes needed.
 """
 
 import os
+import sys
+import time
 from typing import Generator
 
 from agents.pm import PMAgent
@@ -49,6 +51,23 @@ class DevEngine:
         self.agents: dict = {}
         self._workspace: str = ""
         self.worktree: WorktreeSession | None = None  # set in run()
+
+    def _debug(self, msg: str) -> None:
+        """Write a timestamped diagnostic line to stderr and the workspace log."""
+        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+        print(line, file=sys.stderr, flush=True)
+        if self._workspace and os.path.isdir(self._workspace):
+            try:
+                with open(os.path.join(self._workspace, ".engine.log"), "a") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
+
+    def _bus_snapshot(self) -> str:
+        return ", ".join(
+            f"{r}:{len(self.bus._inboxes.get(r, []))}"
+            for r in ["User", "PM", "Architect", "Programmer", "Reviewer"]
+        )
 
     # ----- DevMessage helpers (unchanged from previous version) -----
 
@@ -114,17 +133,21 @@ class DevEngine:
 
         for _step in range(MAX_BUS_STEPS):
             recipient = self.bus.next_pending(priority)
+            self._debug(f"step={_step} recipient={recipient!r} bus=[{self._bus_snapshot()}]")
             if recipient is None:
+                self._debug("!!! bus empty — terminating early !!!")
                 yield self._phase_msg(Phase.SUMMARY, "总线已空，流程结束。")
                 break
 
             if recipient == "User":
                 done = yield from self._handle_user_inbox()
+                self._debug(f"  _handle_user_inbox returned done={done} bus=[{self._bus_snapshot()}]")
                 if done:
                     break
                 continue
 
             yield from self._dispatch_agent(recipient)
+            self._debug(f"  _dispatch_agent({recipient}) finished bus=[{self._bus_snapshot()}]")
         else:
             yield DevMessage(
                 speaker="System",
@@ -163,7 +186,12 @@ class DevEngine:
 
             # --- Approval gate ---
             next_agent = m.metadata.get("next_agent", "")
+            self._debug(
+                f"  approval gate: sender={m.sender} phase={phase.value} "
+                f"next_agent={next_agent!r} metadata={m.metadata}"
+            )
             approval = yield self._approval_msg(phase, m.content)
+            self._debug(f"  approval received: {approval!r}")
 
             edited_content = m.content
             if approval and approval.startswith("edit:"):

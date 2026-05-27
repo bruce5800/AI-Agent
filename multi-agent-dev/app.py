@@ -241,3 +241,11 @@ if not st.session_state.running and not st.session_state.pending_approval:
 # Show workspace path when finished
 if st.session_state.finished and st.session_state.workspace_path:
     st.success(f"🎉 项目已生成！路径：`{st.session_state.workspace_path}`")
+
+    # Surface the engine debug log so we can diagnose premature termination
+    log_path = os.path.join(st.session_state.workspace_path, ".engine.log")
+    if os.path.isfile(log_path):
+        with open(log_path) as f:
+            log_content = f.read()
+        with st.expander("🐞 Engine 调度日志（点击展开）", expanded=False):
+            st.code(log_content, language="text")
