@@ -88,15 +88,23 @@ for msg in st.session_state.messages:
     render_message(msg)
 
 
+def _ui_debug(msg):
+    """Mirror engine._debug for UI-side events."""
+    import time, sys
+    line = f"[{time.strftime('%H:%M:%S')}] [UI] {msg}"
+    print(line, file=sys.stderr, flush=True)
+    engine = st.session_state.get("engine")
+    if engine is not None and getattr(engine, "_workspace", "") and os.path.isdir(engine._workspace):
+        try:
+            with open(os.path.join(engine._workspace, ".engine.log"), "a") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+
 def consume_generator(gen, send_value=None):
-    """Drive a DevEngine generator and stream messages to the UI.
-
-    If `send_value` is provided, the first step is `gen.send(send_value)` to
-    resume from an approval gate; otherwise iteration starts at the top.
-
-    Pauses (returns) when an approval-required message is encountered, after
-    storing it in `st.session_state.pending_approval` and triggering rerun.
-    """
+    """Drive a DevEngine generator and stream messages to the UI."""
+    _ui_debug(f"consume_generator ENTER send_value={send_value!r} gen={id(gen)}")
     last_phase_local = None
     current_placeholder = None
     current_accumulated = ""
@@ -105,17 +113,27 @@ def consume_generator(gen, send_value=None):
 
     try:
         if send_value is not None:
-            first = gen.send(send_value)
+            _ui_debug(f"  calling gen.send({send_value!r})")
+            try:
+                first = gen.send(send_value)
+            except StopIteration:
+                _ui_debug(f"  !!! gen.send raised StopIteration immediately (gen was already exhausted)")
+                raise
+            _ui_debug(f"  gen.send returned: speaker={first.speaker} type={first.msg_type.value} approval={first.requires_approval}")
             iterator = _chain_first(first, gen)
         else:
             iterator = gen
 
+        msg_count = 0
         for msg in iterator:
+            msg_count += 1
             # --- Approval gate: pause ---
             if msg.requires_approval:
+                _ui_debug(f"  approval msg #{msg_count}: pausing, setting pending_approval, calling st.rerun()")
                 st.session_state.pending_approval = msg
                 st.info(f"⏸️ {msg.content}")
                 st.rerun()
+                _ui_debug(f"  !!! st.rerun() did NOT raise — fell through to return")
                 return  # not reached (rerun raises), but explicit
 
             if msg.is_chunk:
@@ -155,12 +173,16 @@ def consume_generator(gen, send_value=None):
                 current_speaker = None
 
     except StopIteration:
+        _ui_debug(f"  caught StopIteration after {msg_count if 'msg_count' in dir() else '?'} msgs")
         pass
+
+    _ui_debug(f"  consume_generator: try block exited. pending_approval={st.session_state.pending_approval is not None}")
 
     # Generator exhausted (not paused at approval) → mark finished.
     # Read workspace_path from the live engine (it's only populated after
     # the first phase yield, so we can't capture it before iteration starts).
     if not st.session_state.pending_approval:
+        _ui_debug(f"  !!! firing FINISHED cleanup (engine_generator set to None, balloons)")
         engine = st.session_state.get("engine")
         if engine is not None:
             st.session_state.workspace_path = engine.state.workspace_path
@@ -179,22 +201,26 @@ def _chain_first(first, gen):
 
 # --- Approval handling ---
 if st.session_state.pending_approval:
+    _ui_debug(f"render approval branch: speaker={st.session_state.pending_approval.speaker} phase={st.session_state.pending_approval.phase.value}")
     approval_msg = st.session_state.pending_approval
     st.info(f"⏸️ {approval_msg.content}")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✅ 通过", type="primary", use_container_width=True):
+            _ui_debug(f"button '通过' clicked for phase={approval_msg.phase.value}")
             st.session_state.pending_approval = None
             st.session_state.approval_result = "approved"
             st.rerun()
     with col2:
         if st.button("🔄 重新生成", use_container_width=True):
+            _ui_debug(f"button '重新生成' clicked for phase={approval_msg.phase.value}")
             st.session_state.pending_approval = None
             st.session_state.approval_result = "regenerate"
             st.rerun()
 
 # --- Resume after approval ---
 elif st.session_state.running and st.session_state.engine_generator and "approval_result" in st.session_state:
+    _ui_debug(f"render resume branch: approval_result={st.session_state.approval_result!r}")
     gen = st.session_state.engine_generator
     approval = st.session_state.pop("approval_result", "approved")
     consume_generator(gen, send_value=approval)
