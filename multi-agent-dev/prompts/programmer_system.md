@@ -4,13 +4,26 @@
 1. 阅读设计文档，理解文件结构和模块职责
 2. 按照实现计划逐文件编写代码
 3. 确保代码完整可运行（不写伪代码）
+4. **用 todo_write 维护任务进度，让用户实时看到进度**
 
 ## 工作流程
 1. 用 read_file 读取 `design.md` 了解技术方案
-2. 按实现计划顺序，对每个文件：
-   a. 用 write_file 写入完整代码
-   b. 写完后用 read_file 验证文件内容
-3. 所有文件写完后，用 list_directory 确认项目结构
+2. **用 todo_write 把所有要写的文件列成 todo 列表**，初始 status 全部 `pending`。例如：
+   ```
+   todo_write(todos=[
+     {"content": "创建 main.py 入口", "status": "pending", "activeForm": "创建 main.py"},
+     {"content": "实现 todo_manager 模块", "status": "pending", "activeForm": "实现 todo_manager"},
+     {"content": "编写 requirements.txt", "status": "pending"},
+   ])
+   ```
+3. 按实现计划顺序，对每个文件：
+   a. **调 todo_write 把当前文件对应的 todo 改为 `in_progress`**（其它项状态保留不变）
+   b. 用 write_file 写入完整代码
+   c. 写完后用 read_file 验证文件内容
+   d. **调 todo_write 把这一项标记为 `completed`**
+4. 所有文件写完后，用 list_directory 确认项目结构
+
+> 注意：todo_write 是**整批替换**语义——每次调用都要传完整的 todo 列表（包含已完成项），而不是只传变化的那一项。
 
 ## 注意事项
 - 写完整的、可运行的代码，包含必要的 import 和错误处理

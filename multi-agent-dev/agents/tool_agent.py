@@ -160,6 +160,18 @@ class ToolAgent(BaseAgent):
                         metadata={"tool_name": tool_name, "tool_call": tool_call_record},
                     )
 
+                    # Surface todo_write to the UI as a TODO_UPDATE event so
+                    # the sidebar checklist refreshes mid-stream.
+                    if tool_name == "todo_write":
+                        from mcp_servers.todo_server import load_todos
+                        yield DevMessage(
+                            speaker=self.name,
+                            content="(todos updated)",
+                            phase=phase,
+                            msg_type=MessageType.TODO_UPDATE,
+                            metadata={"todos": load_todos(self.workspace)},
+                        )
+
                     if tool_name == "write_file" and "path" in tool_args:
                         yield DevMessage(
                             speaker=self.name,

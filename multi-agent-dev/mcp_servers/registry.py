@@ -1,12 +1,13 @@
 """Unified tool registry — collects all MCP tools and provides per-agent filtering."""
 
-from mcp_servers import filesystem_server, terminal_server, git_server
+from mcp_servers import filesystem_server, terminal_server, git_server, todo_server
 
 # Aggregate all tools from all servers
 ALL_TOOLS: dict[str, dict] = {}
 ALL_TOOLS.update(filesystem_server.TOOLS)
 ALL_TOOLS.update(terminal_server.TOOLS)
 ALL_TOOLS.update(git_server.TOOLS)
+ALL_TOOLS.update(todo_server.TOOLS)
 
 # Per-role tool permissions
 ROLE_PERMISSIONS: dict[str, list[str]] = {
@@ -15,6 +16,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "Programmer": [
         "read_file", "write_file", "list_directory", "search_files",
         "run_command", "git_init", "git_add", "git_commit", "git_status", "git_diff",
+        "todo_write",
     ],
     "Reviewer": ["read_file", "list_directory", "search_files", "run_command"],
 }

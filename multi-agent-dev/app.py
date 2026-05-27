@@ -9,6 +9,7 @@ import streamlit as st
 from core.engine import DevEngine
 from core.models import Phase, MessageType, PHASE_LABELS
 from core.workspace import list_workspaces
+from mcp_servers.todo_server import load_todos
 from ui.styles import MAIN_CSS
 from ui.components import (
     render_phase_divider,
@@ -18,6 +19,30 @@ from ui.components import (
     PHASE_ICONS,
     SPEAKER_CONFIG,
 )
+
+
+def _render_todos_into(placeholder, todos):
+    """Paint the live todo checklist into a sidebar placeholder.
+
+    Empty / missing → a quiet caption. Otherwise an emoji-prefixed list with
+    completed items struck-through and the active one bolded so it draws the
+    eye while in_progress.
+    """
+    if not todos:
+        placeholder.caption("（Programmer 启动后会显示任务清单）")
+        return
+    lines = []
+    for t in todos:
+        status = t.get("status", "pending")
+        text = t.get("content", "")
+        if status == "completed":
+            lines.append(f"✅ ~~{text}~~")
+        elif status == "in_progress":
+            display = t.get("activeForm") or text
+            lines.append(f"🔄 **{display}**")
+        else:
+            lines.append(f"⏳ {text}")
+    placeholder.markdown("\n\n".join(lines))
 
 # --- Page config ---
 st.set_page_config(
@@ -66,6 +91,13 @@ with st.sidebar:
         if name == "System":
             continue
         st.markdown(f"{cfg['icon']} **{cfg['label']}** ({name})")
+
+    st.markdown("---")
+    st.markdown("### 📋 任务进度")
+    todo_panel = st.empty()
+    # Initial render from disk (in case we're mid-run or just resumed)
+    _render_todos_into(todo_panel, load_todos(st.session_state.workspace_path)
+                       if st.session_state.workspace_path else [])
 
     st.markdown("---")
     st.markdown("### 📁 历史项目")
@@ -121,6 +153,12 @@ def consume_generator(gen, send_value=None):
             st.session_state.pending_approval = msg
             st.info(f"⏸️ {msg.content}")
             return True  # caller will st.rerun()
+
+        # Live progress checklist refresh. Doesn't append to messages — the
+        # current snapshot lives in the sidebar placeholder, not in chat history.
+        if msg.msg_type == MessageType.TODO_UPDATE:
+            _render_todos_into(todo_panel, msg.metadata.get("todos", []))
+            return False
 
         if msg.is_chunk:
             if msg.speaker != current_speaker or current_placeholder is None:

@@ -35,6 +35,7 @@ class MessageType(str, Enum):
     ERROR = "error"
     PHASE_TRANSITION = "phase_transition"
     ROUTE = "route"  # mailbox routing event (TeamMessage → bus)
+    TODO_UPDATE = "todo_update"  # progress checklist changed (sidebar refresh)
 
 
 @dataclass
