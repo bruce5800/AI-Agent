@@ -112,30 +112,30 @@ pytest tests/   # 126 passed, 0.3s
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                  Streamlit UI (app.py)                       │
-│  消息瀑布 / 审批门 (✅ ✏️ 🔄) / 📋 任务进度 / 工具结果展开       │
+│  消息瀑布 / 审批门 (✅ ✏️ 🔄) / 📋 任务进度 / 工具结果展开          │
 └────────────────────────┬─────────────────────────────────────┘
                          │ yields DevMessage (generator + send)
 ┌────────────────────────▼─────────────────────────────────────┐
 │              DevEngine (core/engine.py)                      │
-│  Bus Router 循环 / 审批门 / Worktree 生命周期 / 编辑透传        │
+│  Bus Router 循环 / 审批门 / Worktree 生命周期 / 编辑透传         │
 └────────┬───────────────────────────────────────┬─────────────┘
          │ TeamMessage 收发                       │ git mgmt
 ┌────────▼─────────────┐                  ┌──────▼─────────────┐
 │   MessageBus         │                  │ WorktreeSession    │
 │  per-recipient inbox │                  │  fix/attempt-N     │
-│  + 全量 audit log    │                  │  squash-merge      │
+│  + 全量 audit log     │                  │  squash-merge      │
 └────────┬─────────────┘                  └────────────────────┘
          │ drain(name) → 派发
 ┌────────▼─────────────────────────────────────────────────────┐
 │                  Agent Layer (agents/)                       │
 │   PM   │  Architect  │  Programmer  │  Reviewer              │
-│   handle(inbox) → run_with_tools (单次 streaming + tool 累积)  │
+│   handle(inbox) → run_with_tools (单次 streaming + tool 累积) │
 └────────────────────────┬─────────────────────────────────────┘
                          │ execute_tool()
 ┌────────────────────────▼─────────────────────────────────────┐
 │            MCP Server Layer (mcp_servers/)                   │
 │   filesystem │ terminal │ git │ todo                         │
-│   路径穿越防护 / 命令白名单 / .venv PATH 注入                   │
+│   路径穿越防护 / 命令白名单 / .venv PATH 注入                    │
 └────────────────────────┬─────────────────────────────────────┘
                          │ subprocess / OS ops (cwd=workspace)
 ┌────────────────────────▼─────────────────────────────────────┐
