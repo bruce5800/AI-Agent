@@ -1,7 +1,41 @@
 """Reusable Streamlit rendering components."""
 
+import re
+
 import streamlit as st
 from core.models import DevMessage, Phase, MessageType, PHASE_LABELS
+
+
+# Match a *single* `#` at the start of a line, followed by space or EOL.
+# Two-or-more hashes (## sections) are preserved — agents legitimately use
+# them for output structure (Reviewer's "## 测试摘要", PM/Architect docs).
+_H1_LINE_RE = re.compile(r"^#(?!#)(?=\s|$)")
+
+
+def escape_h1_outside_code(text: str) -> str:
+    """Escape `# ` at line start so Python/shell comments don't render as H1.
+
+    Why: when an LLM streams "# 主入口" outside a code fence, Streamlit's
+    Markdown renderer turns it into a giant H1 heading that breaks the chat
+    flow. Escaping `# ` → `\\# ` makes it render as plain text.
+
+    Skips lines inside fenced code blocks (``` ... ```), where Python comments
+    are already correctly handled by the code-block renderer.
+    """
+    if "#" not in text:
+        return text
+    out_lines = []
+    in_fence = False
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            out_lines.append(line)
+            continue
+        if not in_fence and _H1_LINE_RE.match(line):
+            line = "\\" + line
+        out_lines.append(line)
+    return "\n".join(out_lines)
 
 PHASE_ICONS = {
     Phase.IDLE: "⏳",
@@ -80,7 +114,7 @@ def render_message(msg: DevMessage):
 
     with st.container(border=True):
         st.markdown(header_html, unsafe_allow_html=True)
-        st.markdown(msg.content)
+        st.markdown(escape_h1_outside_code(msg.content))
 
 
 def render_message_header(speaker: str) -> str:

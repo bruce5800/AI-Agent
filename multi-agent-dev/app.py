@@ -14,6 +14,7 @@ from ui.components import (
     render_phase_divider,
     render_message,
     render_message_header,
+    escape_h1_outside_code,
     PHASE_ICONS,
     SPEAKER_CONFIG,
 )
@@ -133,14 +134,14 @@ def consume_generator(gen, send_value=None):
                 current_speaker = msg.speaker
             current_accumulated += msg.content
             current_placeholder.markdown(
-                current_header_html + "\n\n" + current_accumulated,
+                current_header_html + "\n\n" + escape_h1_outside_code(current_accumulated),
                 unsafe_allow_html=True,
             )
         else:
             if msg.speaker == current_speaker and current_placeholder is not None:
                 if msg.msg_type == MessageType.TEXT:
                     current_placeholder.markdown(
-                        current_header_html + "\n\n" + msg.content,
+                        current_header_html + "\n\n" + escape_h1_outside_code(msg.content),
                         unsafe_allow_html=True,
                     )
             else:
