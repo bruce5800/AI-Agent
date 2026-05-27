@@ -152,12 +152,33 @@ class ToolAgent(BaseAgent):
                         result=result[:500] if result else None,
                     )
 
+                    # `content` keeps a short preview for chat-history brevity;
+                    # `metadata["full_result"]` carries the complete output so
+                    # the UI can offer a "click to expand" view. Messages fed
+                    # back to the LLM (a few lines below) still get the full
+                    # `result` text.
+                    if result:
+                        if len(result) > 200:
+                            preview = (
+                                result[:200]
+                                + f"\n…（已截断；共 {len(result)} 字符，UI 可展开查看完整）"
+                            )
+                        else:
+                            preview = result
+                    else:
+                        preview = "(empty result)"
+
                     yield DevMessage(
                         speaker=self.name,
-                        content=result[:500] if result else "(empty result)",
+                        content=preview,
                         phase=phase,
                         msg_type=MessageType.TOOL_RESULT,
-                        metadata={"tool_name": tool_name, "tool_call": tool_call_record},
+                        metadata={
+                            "tool_name": tool_name,
+                            "tool_call": tool_call_record,
+                            "full_result": result or "",
+                            "result_size": len(result) if result else 0,
+                        },
                     )
 
                     # Surface todo_write to the UI as a TODO_UPDATE event so

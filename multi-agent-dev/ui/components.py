@@ -82,11 +82,20 @@ def render_message(msg: DevMessage):
         return
 
     if msg.msg_type == MessageType.TOOL_RESULT:
-        content = msg.content[:300]
-        st.markdown(
-            f'<div class="tool-result">{content}</div>',
-            unsafe_allow_html=True,
-        )
+        # Long results (file contents, command output, git logs) get a folded
+        # expander so they don't dominate the scroll. Threshold: ~300 chars.
+        full = msg.metadata.get("full_result") or msg.content
+        size = msg.metadata.get("result_size", len(full))
+        tool_name = msg.metadata.get("tool_name", "?")
+        if size > 300:
+            human_size = f"{size} chars" if size < 1024 else f"{size / 1024:.1f} KB"
+            with st.expander(f"📄 {tool_name} → {human_size} (点击展开)", expanded=False):
+                st.code(full, language=None)
+        else:
+            st.markdown(
+                f'<div class="tool-result">{full}</div>',
+                unsafe_allow_html=True,
+            )
         return
 
     if msg.msg_type == MessageType.FILE_CHANGE:
