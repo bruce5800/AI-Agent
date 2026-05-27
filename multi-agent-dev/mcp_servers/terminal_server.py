@@ -1,5 +1,6 @@
 """Terminal MCP tools — execute shell commands within workspace."""
 
+import os
 import re
 import shlex
 import subprocess
@@ -55,11 +56,38 @@ def _check_command_safety(command: str) -> str | None:
     return None
 
 
+def _venv_env(workspace: str) -> dict:
+    """Build an env dict that prefers the workspace's `.venv` interpreter.
+
+    If ``<workspace>/.venv/bin`` (or ``Scripts`` on Windows) exists, prepend
+    it to PATH and set VIRTUAL_ENV. Any bare ``python``, ``pip``, ``pytest``
+    invocation by an agent then resolves to the per-workspace venv instead
+    of the Streamlit host's interpreter — no need for agents to know about
+    it.
+
+    Falls through gracefully to the host PATH if `.venv` doesn't exist
+    (e.g. venv creation failed during workspace bootstrap).
+    """
+    env = os.environ.copy()
+    venv_dir = os.path.join(workspace, ".venv")
+    for bin_name in ("bin", "Scripts"):
+        venv_bin = os.path.join(venv_dir, bin_name)
+        if os.path.isdir(venv_bin):
+            env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+            env["VIRTUAL_ENV"] = venv_dir
+            # Clear PYTHONHOME if set — would override venv site-packages
+            env.pop("PYTHONHOME", None)
+            break
+    return env
+
+
 def run_command(workspace: str, command: str, timeout: int = COMMAND_TIMEOUT) -> str:
     """Run a shell command in the workspace directory.
 
     Returns stdout + stderr. Timeout defaults to 30 seconds, hard cap 120s.
-    All execution is cwd-bound to the workspace.
+    Execution is cwd-bound to the workspace and uses the per-workspace
+    ``.venv`` Python if one exists, so ``pip install`` / ``pytest`` /
+    ``python ...`` don't pollute the Streamlit host's Python.
     """
     safety_error = _check_command_safety(command)
     if safety_error:
@@ -70,6 +98,7 @@ def run_command(workspace: str, command: str, timeout: int = COMMAND_TIMEOUT) ->
             command,
             shell=True,
             cwd=workspace,
+            env=_venv_env(workspace),
             capture_output=True,
             text=True,
             timeout=min(timeout, 120),
