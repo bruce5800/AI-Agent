@@ -103,86 +103,98 @@ def _ui_debug(msg):
 
 
 def consume_generator(gen, send_value=None):
-    """Drive a DevEngine generator and stream messages to the UI."""
+    """Drive a DevEngine generator and stream messages to the UI.
+
+    Critical: we iterate ``gen`` directly via ``next(gen)`` rather than
+    wrapping it in another generator like ``_chain_first(first, gen)``.
+
+    Why: when the wrapper generator's local reference is dropped (e.g. when
+    this function exits via ``RerunException`` from ``st.rerun()``), CPython
+    GC calls ``close()`` on the wrapper, which propagates ``GeneratorExit``
+    *down* through its ``yield from gen`` — terminating ``gen``. The next
+    ``gen.send(...)`` then immediately raises ``StopIteration`` and the
+    cleanup branch incorrectly marks the pipeline as finished.
+
+    Iterating ``gen`` directly avoids the wrapper entirely; ``gen`` is still
+    held by ``session_state.engine_generator`` across reruns, so it stays
+    alive in its paused state.
+    """
     _ui_debug(f"consume_generator ENTER send_value={send_value!r} gen={id(gen)}")
     last_phase_local = None
     current_placeholder = None
     current_accumulated = ""
     current_speaker = None
     current_header_html = ""
+    msg_count = 0
+
+    def _process(msg):
+        """Render a single DevMessage. Returns True if it was an approval gate."""
+        nonlocal last_phase_local, current_placeholder, current_accumulated
+        nonlocal current_speaker, current_header_html
+
+        if msg.requires_approval:
+            _ui_debug(f"  approval msg: pausing, setting pending_approval")
+            st.session_state.pending_approval = msg
+            st.info(f"⏸️ {msg.content}")
+            return True  # caller will st.rerun()
+
+        if msg.is_chunk:
+            if msg.speaker != current_speaker or current_placeholder is None:
+                if msg.phase != last_phase_local:
+                    render_phase_divider(msg.phase)
+                    last_phase_local = msg.phase
+                current_header_html = render_message_header(msg.speaker)
+                current_container = st.container(border=True)
+                current_placeholder = current_container.empty()
+                current_accumulated = ""
+                current_speaker = msg.speaker
+            current_accumulated += msg.content
+            current_placeholder.markdown(
+                current_header_html + "\n\n" + current_accumulated,
+                unsafe_allow_html=True,
+            )
+        else:
+            if msg.speaker == current_speaker and current_placeholder is not None:
+                if msg.msg_type == MessageType.TEXT:
+                    current_placeholder.markdown(
+                        current_header_html + "\n\n" + msg.content,
+                        unsafe_allow_html=True,
+                    )
+            else:
+                if msg.phase != last_phase_local:
+                    render_phase_divider(msg.phase)
+                    last_phase_local = msg.phase
+                render_message(msg)
+            st.session_state.messages.append(msg)
+            current_placeholder = None
+            current_accumulated = ""
+            current_speaker = None
+        return False
 
     try:
+        # First message: from gen.send (resume) or next (fresh).
         if send_value is not None:
             _ui_debug(f"  calling gen.send({send_value!r})")
-            try:
-                first = gen.send(send_value)
-            except StopIteration:
-                _ui_debug(f"  !!! gen.send raised StopIteration immediately (gen was already exhausted)")
-                raise
-            _ui_debug(f"  gen.send returned: speaker={first.speaker} type={first.msg_type.value} approval={first.requires_approval}")
-            iterator = _chain_first(first, gen)
+            msg = gen.send(send_value)
         else:
-            iterator = gen
+            msg = next(gen)
 
-        msg_count = 0
-        for msg in iterator:
+        while True:
             msg_count += 1
-            # --- Approval gate: pause ---
-            if msg.requires_approval:
-                _ui_debug(f"  approval msg #{msg_count}: pausing, setting pending_approval, calling st.rerun()")
-                st.session_state.pending_approval = msg
-                st.info(f"⏸️ {msg.content}")
+            is_approval = _process(msg)
+            if is_approval:
                 st.rerun()
-                _ui_debug(f"  !!! st.rerun() did NOT raise — fell through to return")
-                return  # not reached (rerun raises), but explicit
-
-            if msg.is_chunk:
-                # New speaker / first chunk: open a fresh container
-                if msg.speaker != current_speaker or current_placeholder is None:
-                    if msg.phase != last_phase_local:
-                        render_phase_divider(msg.phase)
-                        last_phase_local = msg.phase
-                    current_header_html = render_message_header(msg.speaker)
-                    current_container = st.container(border=True)
-                    current_placeholder = current_container.empty()
-                    current_accumulated = ""
-                    current_speaker = msg.speaker
-
-                current_accumulated += msg.content
-                current_placeholder.markdown(
-                    current_header_html + "\n\n" + current_accumulated,
-                    unsafe_allow_html=True,
-                )
-            else:
-                # Complete (non-chunk) message
-                if msg.speaker == current_speaker and current_placeholder is not None:
-                    if msg.msg_type == MessageType.TEXT:
-                        current_placeholder.markdown(
-                            current_header_html + "\n\n" + msg.content,
-                            unsafe_allow_html=True,
-                        )
-                else:
-                    if msg.phase != last_phase_local:
-                        render_phase_divider(msg.phase)
-                        last_phase_local = msg.phase
-                    render_message(msg)
-
-                st.session_state.messages.append(msg)
-                current_placeholder = None
-                current_accumulated = ""
-                current_speaker = None
+                _ui_debug(f"  !!! st.rerun() did NOT raise — fell through")
+                return
+            msg = next(gen)
 
     except StopIteration:
-        _ui_debug(f"  caught StopIteration after {msg_count if 'msg_count' in dir() else '?'} msgs")
-        pass
+        _ui_debug(f"  StopIteration after {msg_count} msgs")
 
-    _ui_debug(f"  consume_generator: try block exited. pending_approval={st.session_state.pending_approval is not None}")
+    _ui_debug(f"  try block exited. pending_approval={st.session_state.pending_approval is not None}")
 
-    # Generator exhausted (not paused at approval) → mark finished.
-    # Read workspace_path from the live engine (it's only populated after
-    # the first phase yield, so we can't capture it before iteration starts).
     if not st.session_state.pending_approval:
-        _ui_debug(f"  !!! firing FINISHED cleanup (engine_generator set to None, balloons)")
+        _ui_debug(f"  !!! firing FINISHED cleanup")
         engine = st.session_state.get("engine")
         if engine is not None:
             st.session_state.workspace_path = engine.state.workspace_path
@@ -191,12 +203,6 @@ def consume_generator(gen, send_value=None):
         st.session_state.engine_generator = None
         st.session_state.engine = None
         st.balloons()
-
-
-def _chain_first(first, gen):
-    """Yield `first` then everything else from `gen`."""
-    yield first
-    yield from gen
 
 
 # --- Approval handling ---
