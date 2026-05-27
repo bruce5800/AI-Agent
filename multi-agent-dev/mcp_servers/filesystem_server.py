@@ -13,13 +13,77 @@ def _resolve_path(workspace: str, relative_path: str) -> str:
     return str(target)
 
 
-def read_file(workspace: str, path: str) -> str:
-    """Read the contents of a file. Path is relative to workspace root."""
+# Read defaults: matches Claude Code's Read tool semantics — line-based
+# windowing keeps the prompt manageable on large files while letting an agent
+# page through via `offset` if it really needs more.
+_READ_DEFAULT_LIMIT = 2000     # lines per call (default)
+_READ_MAX_LIMIT = 10000        # absolute upper bound (defends against silly limit=999999)
+_READ_MAX_BYTES = 200_000      # final byte cap (defends against pathological single-line huge files)
+
+
+def read_file(
+    workspace: str,
+    path: str,
+    offset: int = 0,
+    limit: int = _READ_DEFAULT_LIMIT,
+) -> str:
+    """Read a file with line-based windowing.
+
+    Args:
+        path:   file path relative to workspace root
+        offset: 0-based starting line (default 0)
+        limit:  max lines to read (default 2000, hard-capped at 10000)
+
+    Returns:
+        File contents. If truncated, a `…[truncated at line X of Y;
+        call read_file again with offset=X]` tail tells the agent how to
+        continue. A 200KB byte ceiling is also enforced after line slicing
+        for pathological single-line huge files.
+    """
     full_path = _resolve_path(workspace, path)
     if not os.path.isfile(full_path):
         return f"Error: file not found: {path}"
+
+    # Defensive clamping — agents sometimes hallucinate huge limits
+    limit = max(1, min(int(limit or _READ_DEFAULT_LIMIT), _READ_MAX_LIMIT))
+    offset = max(0, int(offset or 0))
+
     with open(full_path, "r", encoding="utf-8") as f:
-        return f.read()
+        lines = f.readlines()
+    total = len(lines)
+
+    if offset >= total and total > 0:
+        return f"(EOF reached; file has {total} lines, offset={offset} is past the end)"
+
+    selected = lines[offset:offset + limit]
+    content = "".join(selected)
+    end_line = offset + len(selected)
+
+    # Header when we're not starting at the top
+    if offset > 0:
+        content = f"[showing lines {offset}-{end_line - 1} of {total}]\n\n" + content
+
+    # Trailing hint when there's more
+    if end_line < total:
+        content += (
+            f"\n\n…[truncated at line {end_line} of {total}; "
+            f"call read_file again with offset={end_line} to continue]"
+        )
+
+    # Final byte cap: catches single-line files or unicode-heavy content that
+    # blew through 200KB despite the line limit.
+    encoded_len = len(content.encode("utf-8"))
+    if encoded_len > _READ_MAX_BYTES:
+        truncated = content.encode("utf-8")[:_READ_MAX_BYTES].decode(
+            "utf-8", errors="ignore"
+        )
+        content = (
+            truncated
+            + f"\n\n…[byte cap {_READ_MAX_BYTES} reached (original {encoded_len} bytes); "
+            f"narrow the range with offset/limit to see more]"
+        )
+
+    return content
 
 
 def write_file(workspace: str, path: str, content: str) -> str:
@@ -71,11 +135,25 @@ def search_files(workspace: str, pattern: str, path: str = ".") -> str:
 TOOLS = {
     "read_file": {
         "function": read_file,
-        "description": "Read the contents of a file. Path is relative to workspace root.",
+        "description": (
+            "Read a file with line-based windowing. By default reads the first "
+            "2000 lines. For larger files, the response ends with a hint like "
+            "'…[truncated at line X of Y; call read_file again with offset=X]'; "
+            "use the returned offset to continue paging. A 200KB byte cap is "
+            "also enforced as a final safeguard."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Relative file path"},
+                "offset": {
+                    "type": "integer",
+                    "description": "0-based starting line (default 0)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max lines to read (default 2000, hard-capped at 10000)",
+                },
             },
             "required": ["path"],
         },
