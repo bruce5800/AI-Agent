@@ -33,7 +33,7 @@ from core.bus import MessageBus, TeamMessage
 from core.models import DevMessage, DevState, MessageType, Phase
 from core.workspace import create_workspace, derive_project_slug
 from core.worktree import WorktreeSession
-from mcp_servers.filesystem_server import list_directory
+from mcp_servers.filesystem_server import list_directory, write_file
 
 
 # Hard cap so a buggy escalation loop can't run forever.
@@ -166,11 +166,35 @@ class DevEngine:
             approval = yield self._approval_msg(phase, m.content)
 
             edited_content = m.content
+            user_edited = False
             if approval and approval.startswith("edit:"):
                 edited_content = approval[5:]
                 approval_kind = "approved"
+                user_edited = edited_content != m.content
             else:
                 approval_kind = approval or "approved"
+
+            # Persist user edits back to the workspace file (e.g. requirements.md
+            # / design.md), so a downstream agent that reads from disk — rather
+            # than from the bus message content — sees the approved version.
+            if user_edited:
+                target = {
+                    Phase.REQUIREMENT: "requirements.md",
+                    Phase.DESIGN: "design.md",
+                }.get(phase)
+                if target and self._workspace:
+                    try:
+                        write_file(self._workspace, target, edited_content)
+                        yield self._phase_msg(
+                            phase, f"📝 用户编辑了 {target}（已写回 workspace）"
+                        )
+                    except Exception as e:
+                        yield DevMessage(
+                            speaker="System",
+                            content=f"(无法写入编辑后的 {target}: {e})",
+                            phase=phase,
+                            msg_type=MessageType.ERROR,
+                        )
 
             if approval_kind == "regenerate":
                 # Send it back to the sender, marked regenerate.

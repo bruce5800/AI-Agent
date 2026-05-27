@@ -187,13 +187,38 @@ def consume_generator(gen, send_value=None):
 if st.session_state.pending_approval:
     approval_msg = st.session_state.pending_approval
     st.info(f"⏸️ {approval_msg.content}")
-    col1, col2 = st.columns(2)
+
+    # Use a content-hash-based key so a new approval gate (different content)
+    # gets a fresh text_area state instead of leaking the previous edit.
+    import hashlib
+    _content_key = hashlib.md5(approval_msg.content.encode("utf-8")).hexdigest()[:8]
+
+    with st.expander("✏️ 编辑内容（可选）", expanded=False):
+        st.caption("修改下方文本后点「修改后通过」，编辑会同步持久化到 workspace 文件并传给下游 agent。")
+        edited_content = st.text_area(
+            label="edit_doc",
+            value=approval_msg.content,
+            height=300,
+            key=f"edit_{approval_msg.phase.value}_{_content_key}",
+            label_visibility="collapsed",
+        )
+
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("✅ 通过", type="primary", use_container_width=True):
             st.session_state.pending_approval = None
             st.session_state.approval_result = "approved"
             st.rerun()
     with col2:
+        if st.button("✏️ 修改后通过", use_container_width=True):
+            st.session_state.pending_approval = None
+            # The `edit:` prefix is the protocol the engine speaks (engine.py:169).
+            # If the user opened the expander but didn't actually change anything,
+            # edited_content == approval_msg.content and the engine's write-back
+            # becomes a no-op write.
+            st.session_state.approval_result = f"edit:{edited_content}"
+            st.rerun()
+    with col3:
         if st.button("🔄 重新生成", use_container_width=True):
             st.session_state.pending_approval = None
             st.session_state.approval_result = "regenerate"
