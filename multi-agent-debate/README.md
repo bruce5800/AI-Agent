@@ -7,7 +7,7 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │                   Streamlit UI                   │
-│         实时渲染辩论流程 + 投票可视化              │
+│         实时渲染辩论流程 + 投票可视化               │
 └──────────────────────┬──────────────────────────┘
                        │
               ┌────────▼────────┐
@@ -34,6 +34,9 @@
 ```
 开场 → 开篇立论 → 攻辩质询(3轮) → 自由辩论(6回合) → 总结陈词 → 评委点评 → 观众投票
 ```
+<p align="center">
+  <img src="docs/images/full-pipeline.gif" alt="full-pipeline" />
+</p>
 
 ## 核心特性
 
@@ -56,12 +59,20 @@ score = 关键词匹配 + 价值对齐(权重×4.0) + 身份相关性 + 内容�
 
 三层联动：身份 → 专业领域加成 | 价值观 → 维度权重加成 | 知识 → 关键词匹配
 
+<p align="center">
+  <img src="docs/images/knowledge-retrival.gif" alt="knowledge-retrival" />
+</p>
+
 ### 自定义辩题 + AI 生成画像
 
 输入任意辩题，系统自动调用 LLM 生成 6 位辩手的完整画像和知识库：
 - 选择 3 个最适合辩题的价值维度
 - 为每位辩手生成 3-4 条带来源的知识条目
 - 职业背景多样化，匹配辩位角色
+
+<p align="center">
+  <img src="docs/images/customise-topic.gif" alt="customise-topic" />
+</p>
 
 ### 观众价值权重投票
 
@@ -79,6 +90,10 @@ score = 关键词匹配 + 价值对齐(权重×4.0) + 身份相关性 + 内容�
 1. 每位观众对正反方在各价值维度上打分 (1-10)
 2. 按个人权重加权计算总分：`weighted_score = Σ(维度得分 × 权重)`
 3. 总分高者获得该观众的一票
+
+<p align="center">
+  <img src="docs/images/audience-vote.gif" alt="audience-vote" />
+</p>
 
 ### 流式输出 + 语音播报
 
